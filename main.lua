@@ -1,117 +1,138 @@
 -- Константы оформления
 local COLOR = {
     BG = 0,
-    ACCENT = 0x07E0, -- Зеленый
-    TEXT = 0xFFFF,   -- Белый
+    ACCENT = 0x07E0, 
+    TEXT = 0xFFFF,   
     GRAY = 0x8410,
-    RED = 0xF800
+    RED = 0xF800,
+    DARK = 0x2104
 }
 
--- Состояние приложения
-local state = "watch" -- "watch" или "menu"
+-- Состояния приложения: "watch", "menu", "wifi_config"
+local state = "watch" 
 local scrollY = 0
-local last_weather_update = -600000 -- 10 минут назад
-local weather_temp = "--"
-local weather_desc = "No Data"
+local last_weather_update = -600000 
+local weather_temp = "No Data"
 
--- Настройки (можно сохранять в FS)
-local brightness = 200
-local city = "London" -- Для API
+-- Данные WiFi
+local wifi_ssid = fs.load("/ssid.txt") or ""
+local wifi_pass = fs.load("/pass.txt") or ""
+local target_field = "ssid" -- что сейчас вводим
 
--- Вспомогательная функция для получения времени
-function get_time_str()
-    local t = hw.getTime()
-    return string.format("%02d:%02d", t.h, t.m)
+-- Для клавиатуры T9
+local last_key, last_time, char_idx = "", 0, 0
+local t9 = {
+    [".,!1"]=".,!1", ["abc2"]="abc2", ["def3"]="def3",
+    ["ghi4"]="ghi4", ["jkl5"]="jkl5", ["mno6"]="mno6",
+    ["pqrs7"]="pqrs7",["tuv8"]="tuv8", ["wxyz9"]="wxyz9",
+    ["*"]="-+=", ["0"]=" ",   ["#"]="#"
+}
+local keys = {".,!1","abc2","def3","ghi4","jkl5","mno6","pqrs7","tuv8","wxyz9","*","0","#","DEL","CLR","OK"}
+
+-- --- ЛОГИКА ---
+
+function handle_t9(k)
+    local now = hw.millis()
+    local chars = t9[k]
+    if not chars then return end
+    
+    local val = (target_field == "ssid") and wifi_ssid or wifi_pass
+    if k == last_key and (now - last_time) < 800 then
+        val = val:sub(1, -2)
+        char_idx = (char_idx % #chars) + 1
+    else
+        char_idx = 1
+    end
+    val = val .. chars:sub(char_idx, char_idx)
+    if target_field == "ssid" then wifi_ssid = val else wifi_pass = val end
+    last_key, last_time = k, now
 end
 
--- Функция загрузки погоды (используем бесплатный API без ключа для примера)
--- В реальном проекте лучше использовать OpenWeatherMap с ключом
 function update_weather()
-    if net.status() == 3 then -- WL_CONNECTED
-        local url = "http://wttr.in/" .. city .. "?format=%t+%C"
-        local data = net.get(url)
-        if data then
-            weather_temp = data
-            last_weather_update = hw.millis()
+    if net.status() == 3 then 
+        local data = net.get("http://wttr.in/?format=%t+%C")
+        if data then weather_temp = data; last_weather_update = hw.millis() end
+    end
+end
+
+-- --- ЭКРАНЫ ---
+
+-- ЭКРАН: Настройка WiFi (аналог Bootstrap)
+function draw_wifi_config()
+    ui.text(20, 20, "WIFI SETUP", 3, COLOR.ACCENT)
+    
+    if ui.input(20, 70, 370, 45, "SSID: "..wifi_ssid, target_field == "ssid") then target_field = "ssid" end
+    if ui.input(20, 125, 370, 45, "PASS: "..wifi_pass, target_field == "pass") then target_field = "pass" end
+
+    if ui.button(20, 185, 180, 45, "CONNECT", 0x0500) then 
+        fs.save("/ssid.txt", wifi_ssid)
+        fs.save("/pass.txt", wifi_pass)
+        net.connect(wifi_ssid, wifi_pass)
+        state = "menu"
+    end
+    if ui.button(210, 185, 180, 45, "CANCEL", COLOR.RED) then state = "menu" end
+
+    -- Клавиатура
+    for i, k in ipairs(keys) do
+        local r, c = math.floor((i-1)/3), (i-1)%3
+        if ui.button(20+c*125, 245+r*42, 115, 38, k, 0x2104) then
+            if k == "DEL" then 
+                if target_field == "ssid" then wifi_ssid=wifi_ssid:sub(1,-2) else wifi_pass=wifi_pass:sub(1,-2) end
+            elseif k == "CLR" then 
+                if target_field == "ssid" then wifi_ssid="" else wifi_pass="" end
+            elseif k == "OK" then target_field = ""
+            else handle_t9(k) end
         end
     end
 end
 
--- ЭКРАН 1: ЦИФЕРБЛАТ
-function draw_watch()
-    -- Большие часы в центре
-    ui.text(60, 150, get_time_str(), 10, COLOR.ACCENT)
-    
-    -- Дата и Батарея
-    local batt = hw.getBatt()
-    ui.text(130, 260, "BATTERY: " .. batt .. "%", 2, batt < 20 and COLOR.RED or COLOR.GRAY)
-    
-    -- Виджет погоды
-    ui.rect(40, 320, 330, 80, 0x2104)
-    ui.text(60, 340, "WEATHER", 1, COLOR.GRAY)
-    ui.text(60, 360, weather_temp, 3, COLOR.TEXT)
-    
-    -- Кнопка перехода в меню
-    if ui.button(155, 430, 100, 40, "MENU", COLOR.GRAY) then
-        state = "menu"
-    end
-    
-    -- Фоновое обновление погоды каждые 10 минут
-    if hw.millis() - last_weather_update > 600000 then
-        update_weather()
-    end
-end
-
--- ЭКРАН 2: МЕНЮ НАСТРОЕК
+-- ЭКРАН: Главное Меню
 function draw_menu()
     ui.text(20, 20, "SETTINGS", 3, COLOR.ACCENT)
+    scrollY = ui.beginList(0, 70, 410, 432, scrollY, 400)
     
-    scrollY = ui.beginList(0, 70, 410, 432, scrollY, 600)
-    
-    -- Слайдер яркости
-    ui.text(20, 10, "Brightness", 2, COLOR.TEXT)
-    local new_bright = ui.slider(20, 40, 370, 40, brightness / 255, COLOR.GRAY, COLOR.ACCENT)
-    if math.floor(new_bright * 255) ~= brightness then
-        brightness = math.floor(new_bright * 255)
-        hw.setBright(brightness)
-    end
-    
-    -- Информация о WiFi
-    ui.rect(20, 110, 370, 80, 0x1082)
-    ui.text(35, 125, "WiFi Status:", 1, COLOR.GRAY)
     local status = net.status()
-    if status == 3 then
-        ui.text(35, 145, "ONLINE", 2, COLOR.ACCENT)
-        ui.text(35, 165, net.getIP(), 1, COLOR.TEXT)
-    else
-        ui.text(35, 145, "OFFLINE", 2, COLOR.RED)
-    end
+    ui.text(20, 10, status == 3 and "Status: Online" or "Status: Offline", 2, status == 3 and COLOR.ACCENT or COLOR.RED)
     
-    -- Кнопки действий
-    if ui.button(20, 210, 370, 50, "FORCE WEATHER UPDATE", 0x3186) then
-        update_weather()
-    end
-    
-    if ui.button(20, 270, 370, 50, "REBOOT TO BOOTSTRAP", COLOR.RED) then
-        -- Удаляем main.lua или просто зажимаем кнопку при старте
-        -- Для простоты тут просто перезагрузка, если вы зажмете BOOT
-        hw.reboot()
-    end
-
-    if ui.button(20, 330, 370, 50, "BACK TO WATCH", COLOR.GRAY) then
-        state = "watch"
-    end
+    if ui.button(20, 50, 370, 60, "WIFI CONFIG", COLOR.DARK) then state = "wifi_config" end
+    if ui.button(20, 120, 370, 60, "UPDATE WEATHER", COLOR.DARK) then update_weather() end
+    if ui.button(20, 190, 370, 60, "BACK", COLOR.GRAY) then state = "watch" end
     
     ui.endList()
 end
 
--- Главная функция отрисовки (вызывается из C++)
+-- ЭКРАН: Циферблат
+function draw_watch()
+    local t = hw.getTime()
+    ui.text(60, 150, string.format("%02d:%02d", t.h, t.m), 10, COLOR.ACCENT)
+    
+    -- Мини-виджеты
+    ui.text(130, 260, "BATT: " .. hw.getBatt() .. "%", 2, COLOR.GRAY)
+    
+    ui.rect(40, 320, 330, 80, COLOR.DARK)
+    ui.text(60, 340, "WEATHER", 1, COLOR.GRAY)
+    ui.text(60, 360, weather_temp, 3, COLOR.TEXT)
+    
+    if ui.button(155, 430, 100, 40, "MENU", COLOR.DARK) then state = "menu" end
+
+    -- Авто-обновление погоды в фоне
+    if net.status() == 3 and (hw.millis() - last_weather_update > 900000) then
+        update_weather()
+    end
+end
+
+-- ГЛАВНЫЙ ЦИКЛ
 function draw()
-    ui.rect(0, 0, 410, 502, COLOR.BG) -- Очистка кадра
+    ui.rect(0, 0, 410, 502, COLOR.BG)
     
     if state == "watch" then
         draw_watch()
     elseif state == "menu" then
         draw_menu()
+    elseif state == "wifi_config" then
+        draw_wifi_config()
     end
 end
+
+-- Попытка авто-подключения при старте, если данные есть
+if wifi_ssid ~= "" then net.connect(wifi_ssid, wifi_pass) end
