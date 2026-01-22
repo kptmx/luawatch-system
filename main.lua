@@ -46,8 +46,8 @@ function handle_t9(k)
 end
 
 function download_test_png()
-    msg = "Downloading test.png..."
-    local url = "https://raw.githubusercontent.com/kptmx/luawatch-system/main/test.png"
+    msg = "Downloading test.jpg..."
+    local url = "https://raw.githubusercontent.com/kptmx/luawatch-system/main/test.jpg"
 
     local res = net.get(url)
     if res and res.ok and res.code == 200 then
@@ -123,7 +123,7 @@ function draw_menu()
     ui.rect(0, 0, SCR_W, SCR_H, 0)
     ui.text(30, 40, "Download OK!", 4, 0x07E0)
 
-    ui.text(30, 120, "File: /test.png", 2, 0xFFFF)
+    ui.text(30, 120, "File: /test.jpg", 2, 0xFFFF)
 
     if ui.button(50, 220, 300, 60, "SHOW IMAGE", 0x07E0) then
         mode = "image"
@@ -138,10 +138,10 @@ function draw_image()
     ui.rect(0, 0, SCR_W, SCR_H, 0)
 
     -- рисуем картинку (центрируем примерно)
-    local ok = ui.drawPNG( (SCR_W-320)/2, (SCR_H-240)/2, "/test.png" )
+    local ok = ui.drawJPG( (SCR_W-320)/2, (SCR_H-240)/2, "/test.jpg" )
 
     if not ok then
-        ui.text(40, 200, "Failed to load /test.png", 3, 0xF800)
+        ui.text(40, 200, "Failed to load /test.jpg", 3, 0xF800)
     end
 
     -- кнопка назад
