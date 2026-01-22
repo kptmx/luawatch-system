@@ -1,79 +1,117 @@
--- Константы экрана
-SCR_W, SCR_H = 410, 502
+-- Константы оформления
+local COLOR = {
+    BG = 0,
+    ACCENT = 0x07E0, -- Зеленый
+    TEXT = 0xFFFF,   -- Белый
+    GRAY = 0x8410,
+    RED = 0xF800
+}
 
--- Состояние системы
-brightness = 0.8
-selected_tab = "Home"
-scroll_y = 0
+-- Состояние приложения
+local state = "watch" -- "watch" или "menu"
+local scrollY = 0
+local last_weather_update = -600000 -- 10 минут назад
+local weather_temp = "--"
+local weather_desc = "No Data"
 
--- Цвета (RGB565)
-COLOR_BG = 0x0000
-COLOR_ACCENT = 0x07E0 -- Зеленый
-COLOR_TEXT = 0xFFFF
-COLOR_CARD = 0x2104
+-- Настройки (можно сохранять в FS)
+local brightness = 200
+local city = "London" -- Для API
 
-function draw()
-    -- 1. Фон
-    ui.rect(0, 0, SCR_W, SCR_H, COLOR_BG)
-
-    -- 2. Верхний статус-бар
-    ui.rect(0, 0, SCR_W, 30, 0x1082)
-    local bat = hw.getBatt()
-    ui.text(SCR_W - 80, 5, bat .. "% BAT", 1, bat < 20 and 0xF800 or 0x07E0)
-    
+-- Вспомогательная функция для получения времени
+function get_time_str()
     local t = hw.getTime()
-    local time_str = string.format("%02d:%02d", t.h, t.m)
-    ui.text(10, 5, time_str, 1, COLOR_TEXT)
+    return string.format("%02d:%02d", t.h, t.m)
+end
 
-    -- 3. Навигация (Tabs)
-    ui.rect(0, 30, SCR_W, 60, 0x0000)
-    if ui.button(10, 35, 120, 50, "HOME", selected_tab == "Home" and COLOR_ACCENT or 0x4208) then
-        selected_tab = "Home"
-    end
-    if ui.button(145, 35, 120, 50, "APPS", selected_tab == "Apps" and COLOR_ACCENT or 0x4208) then
-        selected_tab = "Apps"
-    end
-    if ui.button(280, 35, 120, 50, "SYS", selected_tab == "Sys" and COLOR_ACCENT or 0x4208) then
-        selected_tab = "Sys"
-    end
-
-    -- 4. Основной контент (Список)
-    scroll_y = ui.beginList(10, 100, SCR_W - 20, SCR_H - 110, scroll_y, 800)
-        
-        if selected_tab == "Home" then
-            -- Виджет Больших Часов
-            ui.rect(10, 10, 370, 120, COLOR_CARD)
-            ui.text(80, 35, time_str, 5, COLOR_ACCENT)
-            ui.text(120, 95, "Thursday, Jan 22", 2, 0x8410)
-
-            -- Слайдер яркости
-            ui.text(10, 150, "Display Brightness", 2, COLOR_TEXT)
-            brightness = ui.slider(10, 180, 370, 50, brightness, 0x4208, COLOR_ACCENT)
-            -- Применяем яркость (если есть биндинг)
-            -- hw.setBrightness(brightness * 255)
-
-        elseif selected_tab == "Apps" then
-            -- Сетка приложений (заглушки)
-            local apps = {"Weather", "Music", "Calc", "Maps", "News", "Health"}
-            for i, app in ipairs(apps) do
-                local r, c = math.floor((i-1)/2), (i-1)%2
-                if ui.button(10 + c*185, 10 + r*90, 175, 80, app, 0x3186) then
-                    -- Логика запуска
-                end
-            end
-
-        elseif selected_tab == "Sys" then
-            ui.text(10, 10, "SYSTEM INFO", 2, COLOR_ACCENT)
-            ui.rect(10, 40, 370, 2, 0x4208)
-            
-            ui.text(10, 60, "Firmware: GeminiOS v2.6", 2, 0xFFFF)
-            ui.text(10, 90, "WiFi: Connected", 2, 0x07E0)
-            ui.text(10, 120, "Storage: LittleFS OK", 2, 0xFFFF)
-
-            if ui.button(10, 200, 370, 60, "CHECK UPDATES", 0xF800) then
-                -- Код вызова Bootstrap режима
-            end
+-- Функция загрузки погоды (используем бесплатный API без ключа для примера)
+-- В реальном проекте лучше использовать OpenWeatherMap с ключом
+function update_weather()
+    if net.status() == 3 then -- WL_CONNECTED
+        local url = "http://wttr.in/" .. city .. "?format=%t+%C"
+        local data = net.get(url)
+        if data then
+            weather_temp = data
+            last_weather_update = hw.millis()
         end
+    end
+end
 
+-- ЭКРАН 1: ЦИФЕРБЛАТ
+function draw_watch()
+    -- Большие часы в центре
+    ui.text(60, 150, get_time_str(), 10, COLOR.ACCENT)
+    
+    -- Дата и Батарея
+    local batt = hw.getBatt()
+    ui.text(130, 260, "BATTERY: " .. batt .. "%", 2, batt < 20 and COLOR.RED or COLOR.GRAY)
+    
+    -- Виджет погоды
+    ui.rect(40, 320, 330, 80, 0x2104)
+    ui.text(60, 340, "WEATHER", 1, COLOR.GRAY)
+    ui.text(60, 360, weather_temp, 3, COLOR.TEXT)
+    
+    -- Кнопка перехода в меню
+    if ui.button(155, 430, 100, 40, "MENU", COLOR.GRAY) then
+        state = "menu"
+    end
+    
+    -- Фоновое обновление погоды каждые 10 минут
+    if hw.millis() - last_weather_update > 600000 then
+        update_weather()
+    end
+end
+
+-- ЭКРАН 2: МЕНЮ НАСТРОЕК
+function draw_menu()
+    ui.text(20, 20, "SETTINGS", 3, COLOR.ACCENT)
+    
+    scrollY = ui.beginList(0, 70, 410, 432, scrollY, 600)
+    
+    -- Слайдер яркости
+    ui.text(20, 10, "Brightness", 2, COLOR.TEXT)
+    local new_bright = ui.slider(20, 40, 370, 40, brightness / 255, COLOR.GRAY, COLOR.ACCENT)
+    if math.floor(new_bright * 255) ~= brightness then
+        brightness = math.floor(new_bright * 255)
+        hw.setBright(brightness)
+    end
+    
+    -- Информация о WiFi
+    ui.rect(20, 110, 370, 80, 0x1082)
+    ui.text(35, 125, "WiFi Status:", 1, COLOR.GRAY)
+    local status = net.status()
+    if status == 3 then
+        ui.text(35, 145, "ONLINE", 2, COLOR.ACCENT)
+        ui.text(35, 165, net.getIP(), 1, COLOR.TEXT)
+    else
+        ui.text(35, 145, "OFFLINE", 2, COLOR.RED)
+    end
+    
+    -- Кнопки действий
+    if ui.button(20, 210, 370, 50, "FORCE WEATHER UPDATE", 0x3186) then
+        update_weather()
+    end
+    
+    if ui.button(20, 270, 370, 50, "REBOOT TO BOOTSTRAP", COLOR.RED) then
+        -- Удаляем main.lua или просто зажимаем кнопку при старте
+        -- Для простоты тут просто перезагрузка, если вы зажмете BOOT
+        hw.reboot()
+    end
+
+    if ui.button(20, 330, 370, 50, "BACK TO WATCH", COLOR.GRAY) then
+        state = "watch"
+    end
+    
     ui.endList()
+end
+
+-- Главная функция отрисовки (вызывается из C++)
+function draw()
+    ui.rect(0, 0, 410, 502, COLOR.BG) -- Очистка кадра
+    
+    if state == "watch" then
+        draw_watch()
+    elseif state == "menu" then
+        draw_menu()
+    end
 end
