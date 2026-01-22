@@ -18,7 +18,7 @@ function draw()
 
     -- 2. Верхний статус-бар
     ui.rect(0, 0, SCR_W, 30, 0x1082)
-    local bat = hw.getBattPct()
+    local bat = hw.getBatt()
     ui.text(SCR_W - 80, 5, bat .. "% BAT", 1, bat < 20 and 0xF800 or 0x07E0)
     
     local t = hw.getTime()
