@@ -218,11 +218,6 @@ function fetchPost(tags)
                              ext == "jpg" or ext == "jpeg" or ext == "png" or
                              ext == ""  -- Иногда может быть пустым
             
-            if not supported then
-                app.lastError = "Unsupported format: " .. postData.ext
-                app.loading = false
-                return false
-            end
             
             -- Проверяем URL
             local imageUrl = postData.sample_url or postData.preview_url or postData.file_url
@@ -271,7 +266,7 @@ function loadCurrentImage()
     end
     
     -- Выбираем URL для загрузки
-    local imageUrl = app.currentPost.url or app.currentPost.sample or app.currentPost.preview
+    local imageUrl = app.currentPost.sample or app.currentPost.preview or app.currentPost.url
     
     if not imageUrl or imageUrl == "" then
         app.lastError = "No image URL available"
