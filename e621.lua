@@ -479,7 +479,7 @@ function drawPost()
     -- Загружаем и отображаем изображение если есть
     if sd.exists(post.cacheKey) then
         addLog("Drawing image...")
-        local success = ui.drawJPEG_SD(areaX + 10, areaY + 90, post.cacheKey)
+        local success = ui.drawJPEG_SD(areaX + 10, areaY + 90, post.cacheKey, 2.0)
         if not success then
             ui.text(areaX + 10, areaY + 90, "Image loaded", 1, COLORS.text)
             ui.text(areaX + 10, areaY + 110, "but display failed", 1, COLORS.text)
