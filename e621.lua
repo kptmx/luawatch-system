@@ -48,28 +48,6 @@ local COLORS = {
     progress = 0x07FF
 }
 
-function drawProgress()
-    if app.downloadTotal == 0 then return end
-    
-    local width = SCR_W - 2*SAFE_MARGIN - 20
-    local progressWidth = app.downloadTotal > 0 and math.floor((app.downloadProgress / app.downloadTotal) * width) or 0
-    
-    ui.rect(SAFE_MARGIN + 10, SCR_H - 180, width, 15, 0x4208)
-    ui.rect(SAFE_MARGIN + 10, SCR_H - 180, progressWidth, 15, COLORS.progress)
-    
-    if app.downloadTotal > 0 then
-        local percent = math.floor((app.downloadProgress / app.downloadTotal) * 100)
-        local text = string.format("%d%% (%d/%d KB)", 
-            percent, 
-            math.floor(app.downloadProgress / 1024),
-            math.floor(app.downloadTotal / 1024)
-        )
-        ui.text(SCR_W/2 - 40, SCR_H - 178, text, 1, COLORS.text)
-    else
-        ui.text(SCR_W/2 - 30, SCR_H - 178, "Downloading...", 1, COLORS.text)
-    end
-end
-
 -- Очистка изображений из кэша
 function clearImageCache()
     if app.currentPost and app.currentPost.cacheKey then
@@ -300,8 +278,6 @@ function loadCurrentImage()
             app.downloadProgress = loaded
             app.downloadTotal = total
             addLog("DL: " .. loaded .. "/" .. total)
-            drawProgress()
-            ui.flush())
         end
     )    
     if success then
