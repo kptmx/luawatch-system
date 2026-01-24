@@ -1,4 +1,5 @@
 [
   {"name": "Weather", "file": "weather.lua", "desc": "weather"},
+  {"name": "e621", "file": "e621.lua", "desc": "e621"},
   {"name": "Image test", "file": "imagetest.lua", "desc": "/test.jpg from sd"}
 ]
