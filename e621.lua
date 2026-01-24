@@ -299,7 +299,7 @@ function loadCurrentImage()
         function(loaded, total)
             app.downloadProgress = loaded
             app.downloadTotal = total
-            addLog("DL: " .. loaded .. "/" .. total
+            addLog("DL: " .. loaded .. "/" .. total)
             drawProgress()
             ui.flush())
         end
