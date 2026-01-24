@@ -128,7 +128,7 @@ function draw()
             ui.text(10, y+10, item.name, 2, 0xFFFF)
             if ui.button(280, y+15, 90, 45, "GET", 0x07E0) then
                 local r = net.get("https://raw.githubusercontent.com/"..user.."/"..repo.."/"..branch.."/"..item.file)
-                if r.ok then fs.save("/"..item.file, r.body) msg = "Saved!" else msg = "Fail" end
+                if r.ok then fs.remove("/"..item.file); fs.save("/"..item.file, r.body) msg = "Saved!" else msg = "Fail" end
             end
         end
         ui.endList()
