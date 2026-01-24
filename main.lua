@@ -162,6 +162,7 @@ function draw()
         if ui.button(20, 465, 100, 32, "RUN", 0x07E0) then
             local f = load(fs.load("/"..local_files[selected_idx]))
             if f then f() end
+        end
         if ui.button(80, 465, 100, 32, "DEL", 0x007E) then
             fs.remove("/"..local_files[selected_idx])
         end
