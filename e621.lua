@@ -1,6 +1,5 @@
 -- Минимальная версия для теста
 function draw()
-    ui.rect(0, 0, SCR_W, SCR_H, 0)
     ui.text(100, 100, "e621 Test", 3, 0xFFFF)
     
     if ui.button(100, 200, 100, 50, "TEST", 0x07E0) then
