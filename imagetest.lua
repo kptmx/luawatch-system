@@ -3,7 +3,7 @@ local SCR_W, SCR_H = 410, 502
 local HEADER_H = 60         -- Высота заголовка
 local ITEM_H = 200          -- Высота одного элемента списка
 local IMG_PATH = "/test.jpg"
-local COUNT = 10            -- Количество копий
+local COUNT = 1000            -- Количество копий
 
 -- Переменная для хранения текущей прокрутки
 local scroll_y = 0
@@ -36,7 +36,7 @@ function draw()
 
         -- Изображение с SD карты
         -- Благодаря кэшу, оно загрузится 1 раз, а нарисуется 10 раз
-        ui.drawJPEG_SD(20, y + 50, IMG_PATH, 0.1)
+        ui.drawJPEG_SD(20, y + 50, IMG_PATH)
         
         -- Кнопка для теста (например, выгрузить память)
         if ui.button(200, y + 60, 150, 40, "Unload", 0xF800) then
