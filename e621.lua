@@ -5,7 +5,7 @@
 -- После успешной загрузки сразу показывает viewer
 
 local SCR_W, SCR_H = 410, 502  -- Размеры экрана
-local tags = "score:>50 cute"  -- Пример тегов по умолчанию (можно менять)
+local tags = "score:>50+cute"  -- Пример тегов по умолчанию (можно менять)
 local post_path = nil          -- Путь к загруженному изображению
 local statusMsg = "Enter tags and press Search"  -- Основной статус
 local progress = 0             -- Прогресс загрузки (0-100)
