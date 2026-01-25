@@ -26,6 +26,7 @@ function draw()
 
     -- 4. Рисуем элементы
     for i = 0, COUNT - 1 do
+        ui.flush()
         local y = i * ITEM_H -- Виртуальная Y координата элемента
         
         -- Фон карточки
