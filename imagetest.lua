@@ -1,9 +1,9 @@
 -- Константы
 local SCR_W, SCR_H = 410, 502
 local HEADER_H = 60         -- Высота заголовка
-local ITEM_H = 200          -- Высота одного элемента списка
+local ITEM_H = 400          -- Высота одного элемента списка
 local IMG_PATH = "/test.jpg"
-local COUNT = 1000            -- Количество копий
+local COUNT = 10            -- Количество копий
 
 -- Переменная для хранения текущей прокрутки
 local scroll_y = 0
@@ -26,7 +26,6 @@ function draw()
 
     -- 4. Рисуем элементы
     for i = 0, COUNT - 1 do
-        ui.flush()
         local y = i * ITEM_H -- Виртуальная Y координата элемента
         
         -- Фон карточки
