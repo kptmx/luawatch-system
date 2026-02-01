@@ -40,6 +40,7 @@ function scan_sd()
     local all = sd.list("/")
     sd_files = {}
     for _, name in ipairs(all) do
+        print(name)
         if name:sub(-4) == ".lua" then 
             table.insert(sd_files, name)
         end
