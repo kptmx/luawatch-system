@@ -237,8 +237,7 @@ end
 local function is_supported_image(url)
     if not url then return false end
     return url:match("%.jpg$") or url:match("%.jpeg$") or 
-           url:match("%.JPG$") or url:match("%.JPEG$") or
-           url:match("%.png$") or url:match("%.PNG$")
+           url:match("%.JPG$") or url:match("%.JPEG$")
 end
 
 -- Коллбэк для обновления прогресса
