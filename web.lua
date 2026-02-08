@@ -1,12 +1,9 @@
--- Простой веб-браузер на Lua (улучшенная версия с поддержкой JPEG)
+-- Простой веб-браузер на Lua с поддержкой JPEG и прогресс-баром загрузки
 -- Исправления:
--- • Полностью удаляются <script>, <style> и комментарии <!-- -->
--- • Теги правильно захватываются целиком (с атрибутами), больше никаких остатков тегов в тексте
--- • Лучшая обработка HTML-сущностей (&nbsp;, &amp;, &lt;, &#123; и т.д.)
--- • Игнорируются все теги кроме <a> и блочных (<p>, <div>, <br>, <li>, заголовки)
--- • Блочные теги добавляют отступ (новая строка)
--- • Текст очищается от лишних пробелов
--- • Добавлена поддержка JPEG изображений через теги <img>
+-- • Добавлен прогресс-бар загрузки изображений
+-- • Callback в net.download для отслеживания прогресса
+-- • UI обновляется во время загрузки
+-- • Показывается количество загруженных/всего изображений
 
 local SCR_W, SCR_H = 410, 502
 local LINE_H = 28
@@ -14,13 +11,23 @@ local LINK_H = 36
 local IMAGE_H = 120  -- Стандартная высота для изображений
 local MAX_CHARS_PER_LINE = 24
 
-local current_url = "https://furaffinity.net"
+local current_url = "https://www.furtails.pw"
 local history = {}
 local history_pos = 0
 local scroll_y = 0
 
 local content = {}
 local content_height = 0
+
+-- Состояние загрузки изображений
+local image_loading = {
+    total = 0,          -- Всего изображений на странице
+    loaded = 0,         -- Успешно загружено
+    failed = 0,         -- Не удалось загрузить
+    current_url = nil,  -- Текущее загружаемое изображение
+    current_progress = 0, -- Прогресс текущей загрузки (0-100)
+    current_total = 0   -- Общий размер текущего файла
+}
 
 -- Кэш изображений (URL -> {loaded: bool, path: string})
 local image_cache = {}
@@ -280,40 +287,121 @@ local function add_newline()
     end
 end
 
--- Загрузка изображения в кэш
-local function load_image_to_cache(img_url)
+-- Callback функция для отслеживания прогресса загрузки
+local function download_progress_callback(loaded, total)
+    -- Обновляем прогресс текущей загрузки
+    image_loading.current_progress = loaded
+    image_loading.current_total = total
+
+    draw()
+    ui.flush()
+    -- Принудительно вызываем перерисовку UI
+    -- В реальной системе это должно быть через механизм событий
+    -- Но здесь мы просто запомним состояние, а draw() проверит его
+end
+
+-- Загрузка изображения в кэш с callback
+local function load_image_to_cache(img_url, img_index)
     if image_cache[img_url] then
         return image_cache[img_url].loaded
     end
     
     -- Инициализируем запись в кэше
+    local cache_path = "/cache/img_" .. tostring(img_index) .. ".jpg"
     image_cache[img_url] = {
         loaded = false,
-        path = "/cache/" .. tostring(#image_cache + 1) .. ".jpg",
-        loading = false
+        path = cache_path,
+        loading = true,
+        index = img_index
     }
     
-    -- Начинаем асинхронную загрузку
-    local cache_entry = image_cache[img_url]
-    cache_entry.loading = true
+    -- Обновляем состояние загрузки
+    image_loading.current_url = img_url
+    image_loading.current_progress = 0
+    image_loading.current_total = 0
     
-    -- Функция для загрузки изображения
-    local function download_image()
-        local result = net.download(img_url, cache_entry.path, "flash")
-        cache_entry.loading = false
-        if result then
-            cache_entry.loaded = true
-            print("Image loaded: " .. img_url)
-        else
-            print("Failed to load image: " .. img_url)
+    print("Starting download: " .. img_url .. " -> " .. cache_path)
+    
+    -- Запускаем загрузку с callback
+    local success = net.download(img_url, cache_path, "flash", download_progress_callback)
+    
+    -- Обрабатываем результат
+    image_cache[img_url].loading = false
+    
+    if success then
+        image_cache[img_url].loaded = true
+        image_loading.loaded = imacache_entryge_loading.loaded + 1
+        print("Download completed: " .. img_url)
+    else
+        image_cache[img_url].failed = true
+        image_loading.failed = image_loading.failed + 1
+        print("Download failed: " .. img_url)
+        
+        -- Удаляем пустой файл если он создался
+        if fs.exists(cache_path) then
+            fs.remove(cache_path)
         end
     end
     
-    -- Запускаем загрузку (в идеале в отдельном потоке, но в Lua просто вызовем)
-    -- В реальности нужно использовать корутины или отложенную загрузку
-    download_image()
+    -- Сбрасываем текущую загрузку
+    image_loading.current_url = nil
+    image_loading.current_progress = 0
+    image_loading.current_total = 0
     
-    return false  -- Пока не загружено
+    return success
+end
+
+-- Функция для последовательной загрузки всех изображений
+local function start_image_downloads()
+    local image_urls = {}
+    
+    -- Собираем все URL изображений из контента
+    for _, item in ipairs(content) do
+        if item.type == "image" and item.url and not image_cache[item.url] then
+            table.insert(image_urls, item.url)
+        end
+    end
+    
+    -- Инициализируем состояние загрузки
+    image_loading.total = #image_urls
+    image_loading.loaded = 0
+    image_loading.failed = 0
+    
+    -- Если нет изображений, сразу выходим
+    if image_loading.total == 0 then
+        return
+    end
+    
+    print("Found " .. image_loading.total .. " images to download")
+    
+    -- Запускаем загрузку первого изображения
+    if #image_urls > 0 then
+        local first_url = image_urls[1]
+        load_image_to_cache(first_url, 1)
+    end
+end
+
+-- Функция для проверки и продолжения загрузки следующих изображений
+local function continue_image_downloads()
+    -- Если ничего не загружается сейчас
+    if not image_loading.current_url then
+        -- Ищем следующее незагруженное изображение
+        local next_index = image_loading.loaded + image_loading.failed + 1
+        
+        if next_index <= image_loading.total then
+            -- Нужно найти URL по индексу
+            local image_count = 0
+            for _, item in ipairs(content) do
+                if item.type == "image" and item.url then
+                    image_count = image_count + 1
+                    if image_count == next_index then
+                        load_image_to_cache(item.url, next_index)
+                        break
+                    end
+                end
+            end
+        end
+    end
 end
 
 -- ==========================================
@@ -323,7 +411,6 @@ end
 function parse_html(html)
     content = {}
     content_height = 60
-    image_cache = {}  -- Очищаем кэш изображений при новой странице
     
     html = remove_junk(html)
 
@@ -401,8 +488,6 @@ function parse_html(html)
                                img_url:match("%.JPG$") or img_url:match("%.JPEG$") then
                                 -- Добавляем элемент изображения
                                 add_content(alt, false, img_url, true)
-                                -- Начинаем загрузку в кэш
-                                load_image_to_cache(img_url)
                             else
                                 -- Для не-JPEG изображений показываем только alt текст
                                 add_content("[Image: " .. alt .. "]", false, img_url)
@@ -426,6 +511,18 @@ function load_page(new_url)
     if not new_url:match("^https?://") then
         new_url = "https://" .. new_url
     end
+    
+    -- Сбрасываем состояние загрузки
+    image_loading.total = 0
+    image_loading.loaded = 0
+    image_loading.failed = 0
+    image_loading.current_url = nil
+    image_loading.current_progress = 0
+    image_loading.current_total = 0
+    
+    -- Очищаем кэш изображений
+    clear_image_cache()
+    
     local res = net.get(new_url)
     if res.ok and res.code == 200 then
         current_url = new_url
@@ -433,6 +530,9 @@ function load_page(new_url)
         history_pos = #history
         parse_html(res.body)
         scroll_y = 0
+        
+        -- Запускаем загрузку изображений после парсинга
+        start_image_downloads()
     else
         content = {}
         content_height = 200
@@ -451,17 +551,26 @@ local function go_back()
     end
 end
 
--- Очистка кэша изображений при перезагрузке
+-- Очистка кэша изображений
 local function clear_image_cache()
-    for _, cache_entry in pairs(image_cache) do
-        if cache_entry.path then
+    for url, cache_entry in pairs(image_cache) do
+        if cache_entry.path and fs.exists(cache_entry.path) then
             fs.remove(cache_entry.path)
         end
     end
     image_cache = {}
 end
 
--- Отрисовка с поддержкой изображений
+-- Функция для отрисовки прогресс-бара
+local function draw_progress_bar(x, y, width, height, progress, color)
+    ui.rect(x, y, width, height, 0x4208)  -- Фон
+    local fill_width = math.floor(width * progress / 100)
+    if fill_width > 0 then
+        ui.rect(x, y, fill_width, height, color)
+    end
+end
+
+-- Отрисовка с поддержкой изображений и прогресс-баром
 function draw()
     ui.rect(0, 0, SCR_W, SCR_H, 0)
 
@@ -472,21 +581,74 @@ function draw()
     end
     ui.text(10, 12, display_url, 2, 0xFFFF)
 
-    -- Кнопки
-    if history_pos > 1 then
-        if ui.button(10, 52, 100, 40, "Back", 0x4208) then go_back() end
+    -- Проверяем, нужно ли загружать следующее изображение
+    continue_image_downloads()
+    
+    -- Статус загрузки изображений (если есть)
+    local status_y = 52
+    if image_loading.total > 0 then
+        -- Фон для статуса
+        ui.rect(0, status_y, SCR_W, 50, 0x2104)
+        
+        -- Информация о загрузке
+        local status_text = string.format("Images: %d/%d", 
+            image_loading.loaded, image_loading.total)
+        
+        if image_loading.failed > 0 then
+            status_text = status_text .. string.format(" (%d failed)", image_loading.failed)
+        end
+        
+        ui.text(10, status_y + 5, status_text, 1, 0xFFFF)
+        
+        -- Прогресс-бар общего прогресса
+        local total_progress = 0
+        if image_loading.total > 0 then
+            total_progress = ((image_loading.loaded + image_loading.failed) / image_loading.total) * 100
+        end
+        draw_progress_bar(10, status_y + 25, SCR_W - 20, 8, total_progress, 0x07E0)
+        
+        -- Если идет загрузка конкретного изображения
+        if image_loading.current_url then
+            local current_progress = 0
+            if image_loading.current_total > 0 then
+                current_progress = (image_loading.current_progress / image_loading.current_total) * 100
+            end
+            
+            -- Имя текущего файла
+            local filename = image_loading.current_url:match("/([^/]+)$") or image_loading.current_url
+            if utf8_len(filename) > 40 then
+                filename = utf8_sub(filename, 1, 37) .. "..."
+            end
+            
+            ui.text(10, status_y + 35, filename, 1, 0x07FF)
+            draw_progress_bar(10, status_y + 45, SCR_W - 20, 6, current_progress, 0x07FF)
+            
+            -- Процент
+            local percent_text = string.format("%d%%", math.floor(current_progress))
+            ui.text(SCR_W - 40, status_y + 35, percent_text, 1, 0x07E0)
+        end
+        
+        status_y = status_y + 60  -- Сдвигаем кнопки ниже
     end
-    if ui.button(120, 52, 130, 40, "Reload", 0x4208) then 
+
+    -- Кнопки (сдвигаем вниз если есть статус загрузки)
+    local button_y = status_y
+    
+    if history_pos > 1 then
+        if ui.button(10, button_y, 100, 40, "Back", 0x4208) then go_back() end
+    end
+    if ui.button(120, button_y, 130, 40, "Reload", 0x4208) then 
         clear_image_cache()
         load_page(current_url) 
     end
-    if ui.button(260, 52, 130, 40, "Home", 0x4208) then 
+    if ui.button(260, button_y, 130, 40, "Home", 0x4208) then 
         clear_image_cache()
         load_page("https://www.furtails.pw") 
     end
 
-    -- Контент
-    scroll_y = ui.beginList(0, 100, SCR_W, SCR_H - 100, scroll_y, content_height)
+    -- Контент (сдвигаем ниже кнопок и статуса)
+    local content_start_y = button_y + 50
+    scroll_y = ui.beginList(0, content_start_y, SCR_W, SCR_H - content_start_y, scroll_y, content_height)
 
     local cy = 20
     for _, item in ipairs(content) do
@@ -520,19 +682,34 @@ function draw()
                 end
             elseif cache_entry and cache_entry.loading then
                 -- Показываем индикатор загрузки
-                ui.text(20, cy + 50, "Loading image...", 1, 0x07E0)
+                ui.text(20, cy + 30, "Loading...", 2, 0x07E0)
+                
+                -- Прогресс-бар для этого конкретного изображения
+                if item.url == image_loading.current_url then
+                    local progress = 0
+                    if image_loading.current_total > 0 then
+                        progress = (image_loading.current_progress / image_loading.current_total) * 100
+                    end
+                    draw_progress_bar(50, cy + 60, SCR_W - 100, 6, progress, 0x07E0)
+                end
             else
                 -- Показываем alt текст
                 ui.text(20, cy + 50, "[Image: " .. item.text .. "]", 1, 0xFFFF)
             end
             
-            -- Делаем изображение кликабельным (для просмотра или загрузки)
+            -- Делаем изображение кликабельным (для принудительной перезагрузки)
             if ui.button(10, cy, SCR_W - 20, IMAGE_H, "", 0x0101) then
-                -- При клике на изображение можно открыть его в полный размер
-                -- или начать принудительную загрузку
-                if cache_entry and not cache_entry.loaded and not cache_entry.loading then
-                    load_image_to_cache(item.url)
+                -- При клике удаляем из кэша и начинаем загрузку заново
+                if cache_entry then
+                    if cache_entry.path and fs.exists(cache_entry.path) then
+                        fs.remove(cache_entry.path)
+                    end
+                    image_cache[item.url] = nil
+                    image_loading.loaded = math.max(0, image_loading.loaded - 1)
                 end
+                
+                -- Начинаем загрузку этого изображения
+                load_image_to_cache(item.url, image_loading.loaded + image_loading.failed + 1)
             end
             
             cy = cy + IMAGE_H + 10  -- +10 для отступа после изображения
@@ -541,13 +718,15 @@ function draw()
 
     ui.endList()
     
-    -- Информация о кэше
-    local loaded_count = 0
-    for _, cache_entry in pairs(image_cache) do
-        if cache_entry.loaded then loaded_count = loaded_count + 1 end
-    end
-    if loaded_count > 0 then
-        ui.text(SCR_W - 100, SCR_H - 20, "Images: " .. loaded_count, 1, 0x07E0)
+    -- Индикатор в углу экрана
+    if image_loading.total > 0 then
+        local indicator_text = string.format("%d/%d", image_loading.loaded, image_loading.total)
+        ui.text(SCR_W - 70, SCR_H - 20, indicator_text, 1, 0x07E0)
+        
+        -- Красный индикатор если есть ошибки
+        if image_loading.failed > 0 then
+            ui.text(SCR_W - 30, SCR_H - 20, "!", 2, 0xF800)
+        end
     end
 end
 
