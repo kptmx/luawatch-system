@@ -7,7 +7,7 @@ local LINK_H = 36
 local IMAGE_H = 120
 local MAX_CHARS_PER_LINE = 24
 
-local current_url = "https://www.furtails.pw"
+local current_url = "https://furaffinity.net"
 local history, history_pos = {}, 0
 local scroll_y = 0
 local content, content_height = {}, 0
