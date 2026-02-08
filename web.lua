@@ -1,6 +1,6 @@
 -- Минимальный веб-браузер
 local SCR_W, SCR_H = 410, 502
-local url = "https://example.com"
+local url = "https://www.google.com"
 local scroll = 0
 local lines = {}
 local loading = false
