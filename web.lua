@@ -1,12 +1,9 @@
--- Простой веб-браузер на Lua (улучшенная версия с поддержкой JPEG)
+-- Простой веб-браузер на Lua с ленивой загрузкой изображений по клику
 -- Исправления:
--- • Полностью удаляются <script>, <style> и комментарии <!-- -->
--- • Теги правильно захватываются целиком (с атрибутами), больше никаких остатков тегов в тексте
--- • Лучшая обработка HTML-сущностей (&nbsp;, &amp;, &lt;, &#123; и т.д.)
--- • Игнорируются все теги кроме <a> и блочных (<p>, <div>, <br>, <li>, заголовки)
--- • Блочные теги добавляют отступ (новая строка)
--- • Текст очищается от лишних пробелов
--- • Добавлена поддержка JPEG изображений через теги <img>
+-- • Изображения загружаются ТОЛЬКО по клику
+-- • Поддерживаемые форматы выделяются особым стилем
+-- • Прогресс загрузки показывается прямо на месте изображения
+-- • net.download с callback обновляет UI через ui.fillRect + ui.flush
 
 local SCR_W, SCR_H = 410, 502
 local LINE_H = 28
@@ -22,7 +19,16 @@ local scroll_y = 0
 local content = {}
 local content_height = 0
 
--- Кэш изображений (URL -> {loaded: bool, path: string})
+-- Состояние загрузки конкретного изображения
+local image_loading = {
+    url = nil,          -- URL загружаемого изображения
+    progress = 0,       -- Прогресс текущей загрузки (0-100)
+    total_size = 0,     -- Общий размер файла
+    loaded_size = 0,    -- Загружено байт
+    callback_active = false -- Идет ли загрузка прямо сейчас
+}
+
+-- Кэш изображений (URL -> {loaded: bool, path: string, failed: bool})
 local image_cache = {}
 
 -- Разрешение относительных ссылок
@@ -121,7 +127,7 @@ local function remove_junk(html)
             table.insert(out, html:sub(i))
             break
         end
-        table.insert(out, html:sub(i, start_c - 1))
+        table.insert(out, html:sub(i, start_card - 1))
         local end_c = html:find("%-%->", start_c + 4)
         if not end_c then break end -- не закрыт комментарий
         i = end_c + 3
@@ -252,7 +258,7 @@ local function wrap_text(text)
 end
 
 -- Добавление контента (обновленная версия с поддержкой изображений)
-function add_content(text, is_link, link_url, is_image)
+function add_content(text, is_link, link_url, is_image, image_url)
     if not text or text == "" then return end
     
     local lines = wrap_text(text)
@@ -261,6 +267,7 @@ function add_content(text, is_link, link_url, is_image)
             type = is_image and "image" or (is_link and "link" or "text"),
             text = line,
             url = link_url,
+            image_url = image_url,  -- Для изображений сохраняем оригинальный URL
             alt_text = text  -- Для изображений сохраняем alt текст
         })
         if is_image then
@@ -280,40 +287,114 @@ local function add_newline()
     end
 end
 
--- Загрузка изображения в кэш
+-- Проверяем, поддерживается ли формат изображения
+local function is_supported_image(url)
+    if not url then return false end
+    -- Поддерживаем JPEG и PNG (PNG тоже можно попробовать отобразить)
+    return url:match("%.jpg$") or url:match("%.jpeg$") or 
+           url:match("%.JPG$") or url:match("%.JPEG$") or
+           url:match("%.png$") or url:match("%.PNG$")
+end
+
+-- Callback функция для отслеживания прогресса загрузки
+-- Может вызывать ui функции для обновления экрана!
+local function download_progress_callback(loaded, total)
+    -- Обновляем состояние загрузки
+    image_loading.loaded_size = loaded
+    image_loading.total_size = total
+    
+    if total > 0 then
+        image_loading.progress = math.floor((loaded / total) * 100)
+    else
+        image_loading.progress = 0
+    end
+    
+    -- Пытаемся обновить прогресс-бар на экране
+    -- Для этого нужно найти элемент с этим изображением и перерисовать его область
+    -- В простейшем случае просто запомним, что нужно перерисовать
+end
+
+-- Загрузка изображения в кэш с callback и обновлением UI
 local function load_image_to_cache(img_url)
-    if image_cache[img_url] then
+    if not img_url then return false end
+    
+    -- Если уже загружается или загружено, ничего не делаем
+    if image_cache[img_url] and (image_cache[img_url].loaded or image_cache[img_url].loading) then
         return image_cache[img_url].loaded
     end
+    
+    -- Проверяем, поддерживается ли формат
+    if not is_supported_image(img_url) then
+        image_cache[img_url] = {
+            loaded = false,
+            failed = true,
+            error = "Unsupported format"
+        }
+        return false
+    end
+    
+    -- Создаем уникальное имя файла для кэша
+    local filename = "img_" .. tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)) .. ".jpg"
+    local cache_path = "/cache/" .. filename
     
     -- Инициализируем запись в кэше
     image_cache[img_url] = {
         loaded = false,
-        path = "/cache/" .. tostring(#image_cache + 1) .. ".jpg",
-        loading = false
+        loading = true,
+        path = cache_path,
+        progress = 0
     }
     
-    -- Начинаем асинхронную загрузку
-    local cache_entry = image_cache[img_url]
-    cache_entry.loading = true
+    -- Устанавливаем текущую загрузку
+    image_loading.url = img_url
+    image_loading.progress = 0
+    image_loading.total_size = 0
+    image_loading.loaded_size = 0
+    image_loading.callback_active = true
     
-    -- Функция для загрузки изображения
-    local function download_image()
-        local result = net.download(img_url, cache_entry.path, "flash")
-        cache_entry.loading = false
-        if result then
-            cache_entry.loaded = true
-            print("Image loaded: " .. img_url)
-        else
-            print("Failed to load image: " .. img_url)
+    print("Starting download: " .. img_url .. " -> " .. cache_path)
+    
+    -- Запускаем загрузку с callback
+    local success = net.download(img_url, cache_path, "flash", download_progress_callback)
+    
+    -- Загрузка завершена
+    image_loading.callback_active = false
+    image_loading.url = nil
+    
+    if success then
+        image_cache[img_url].loaded = true
+        image_cache[img_url].loading = false
+        image_cache[img_url].progress = 100
+        print("Download completed: " .. img_url)
+    else
+        image_cache[img_url].failed = true
+        image_cache[img_url].loading = false
+        image_cache[img_url].error = "Download failed"
+        print("Download failed: " .. img_url)
+        
+        -- Удаляем пустой файл если он создался
+        if fs.exists(cache_path) then
+            fs.remove(cache_path)
         end
     end
     
-    -- Запускаем загрузку (в идеале в отдельном потоке, но в Lua просто вызовем)
-    -- В реальности нужно использовать корутины или отложенную загрузку
-    download_image()
+    return success
+end
+
+-- Функция для отрисовки прогресс-бара (используется в draw)
+local function draw_progress_bar(x, y, width, height, progress, color, bg_color)
+    -- Фон
+    ui.rect(x, y, width, height, bg_color or 0x4208)
     
-    return false  -- Пока не загружено
+    -- Заполненная часть
+    local fill_width = math.max(2, math.floor(width * progress / 100))
+    if fill_width > 0 then
+        ui.rect(x, y, fill_width, height, color)
+    end
+    
+    -- Текст прогресса
+    local percent_text = tostring(math.floor(progress)) .. "%"
+    ui.text(x + width/2 - 10, y + height/2 - 4, percent_text, 1, 0xFFFF)
 end
 
 -- ==========================================
@@ -323,7 +404,6 @@ end
 function parse_html(html)
     content = {}
     content_height = 60
-    image_cache = {}  -- Очищаем кэш изображений при новой странице
     
     html = remove_junk(html)
 
@@ -396,16 +476,13 @@ function parse_html(html)
                     if src then
                         local img_url = resolve_url(current_url, src)
                         if img_url then
-                            -- Проверяем, это JPEG или другое изображение
-                            if img_url:match("%.jpg$") or img_url:match("%.jpeg$") or 
-                               img_url:match("%.JPG$") or img_url:match("%.JPEG$") then
-                                -- Добавляем элемент изображения
-                                add_content(alt, false, img_url, true)
-                                -- Начинаем загрузку в кэш
-                                load_image_to_cache(img_url)
+                            -- Проверяем, поддерживается ли формат
+                            if is_supported_image(img_url) then
+                                -- Для поддерживаемых форматов показываем специальный стиль
+                                add_content("[CLICK TO LOAD: " .. alt .. "]", false, nil, true, img_url)
                             else
-                                -- Для не-JPEG изображений показываем только alt текст
-                                add_content("[Image: " .. alt .. "]", false, img_url)
+                                -- Для неподдерживаемых форматов просто текст
+                                add_content("[Image: " .. alt .. " (unsupported)]", false, img_url)
                             end
                         end
                     end
@@ -426,6 +503,10 @@ function load_page(new_url)
     if not new_url:match("^https?://") then
         new_url = "https://" .. new_url
     end
+    
+    -- Очищаем кэш изображений
+    clear_image_cache()
+    
     local res = net.get(new_url)
     if res.ok and res.code == 200 then
         current_url = new_url
@@ -451,17 +532,19 @@ local function go_back()
     end
 end
 
--- Очистка кэша изображений при перезагрузке
+-- Очистка кэша изображений
 local function clear_image_cache()
-    for _, cache_entry in pairs(image_cache) do
-        if cache_entry.path then
+    for url, cache_entry in pairs(image_cache) do
+        if cache_entry.path and fs.exists(cache_entry.path) then
             fs.remove(cache_entry.path)
         end
     end
     image_cache = {}
+    image_loading.url = nil
+    image_loading.callback_active = false
 end
 
--- Отрисовка с поддержкой изображений
+-- Отрисовка с ленивой загрузкой изображений
 function draw()
     ui.rect(0, 0, SCR_W, SCR_H, 0)
 
@@ -489,7 +572,7 @@ function draw()
     scroll_y = ui.beginList(0, 100, SCR_W, SCR_H - 100, scroll_y, content_height)
 
     local cy = 20
-    for _, item in ipairs(content) do
+    for idx, item in ipairs(content) do
         if item.type == "text" then
             if item.text ~= "" then
                 ui.text(20, cy, item.text, 2, 0xFFFF)
@@ -506,32 +589,94 @@ function draw()
             end
             cy = cy + LINK_H
         elseif item.type == "image" then
-            -- Фон для изображения
-            ui.rect(10, cy, SCR_W - 20, IMAGE_H, 0x2104)
+            -- Особый стиль для поддерживаемых изображений
+            local is_supported = is_supported_image(item.image_url)
+            local cache_entry = item.image_url and image_cache[item.image_url]
             
-            -- Проверяем, загружено ли изображение
-            local cache_entry = image_cache[item.url]
-            if cache_entry and cache_entry.loaded then
-                -- Показываем JPEG изображение
-                local success = ui.drawJPEG(15, cy + 5, cache_entry.path)
-                if not success then
-                    -- Если не удалось отобразить, показываем placeholder
-                    ui.text(20, cy + 50, "[Image: " .. item.text .. "]", 1, 0xFFFF)
+            -- Разные цвета фона в зависимости от состояния
+            local bg_color = 0x2104  -- Серый по умолчанию
+            
+            if is_supported then
+                if cache_entry and cache_entry.loaded then
+                    bg_color = 0x0520  -- Темно-зеленый для загруженных
+                elseif cache_entry and cache_entry.loading then
+                    bg_color = 0xFD20  -- Оранжевый для загружающихся
+                elseif cache_entry and cache_entry.failed then
+                    bg_color = 0xF800  -- Красный для неудачных
+                else
+                    bg_color = 0x001F  -- Темно-синий для кликабельных (незагруженных)
                 end
-            elseif cache_entry and cache_entry.loading then
-                -- Показываем индикатор загрузки
-                ui.text(20, cy + 50, "Loading image...", 1, 0x07E0)
-            else
-                -- Показываем alt текст
-                ui.text(20, cy + 50, "[Image: " .. item.text .. "]", 1, 0xFFFF)
             end
             
-            -- Делаем изображение кликабельным (для просмотра или загрузки)
+            -- Фон для изображения
+            ui.rect(10, cy, SCR_W - 20, IMAGE_H, bg_color)
+            
+            -- Текст (alt)
+            local display_text = item.text
+            if is_supported then
+                display_text = display_text .. " ✓"
+            end
+            
+            ui.text(20, cy + 10, display_text, 1, 0xFFFF)
+            
+            -- Если идет загрузка этого изображения, показываем прогресс
+            if cache_entry and cache_entry.loading and item.image_url == image_loading.url then
+                -- Прогресс-бар поверх изображения
+                local progress = image_loading.progress
+                if image_loading.total_size > 0 then
+                    progress = math.floor((image_loading.loaded_size / image_loading.total_size) * 100)
+                end
+                
+                -- Полупрозрачный фон для прогресс-бара
+                ui.rect(20, cy + 40, SCR_W - 40, 30, 0x0000)
+                
+                -- Сам прогресс-бар
+                draw_progress_bar(30, cy + 45, SCR_W - 60, 20, progress, 0x07E0, 0x4208)
+                
+                -- Информация о размере
+                if image_loading.total_size > 0 then
+                    local size_text = string.format("%d/%d KB", 
+                        math.floor(image_loading.loaded_size / 1024),
+                        math.floor(image_loading.total_size / 1024))
+                    ui.text(SCR_W/2 - 30, cy + 70, size_text, 1, 0xFFFF)
+                end
+            elseif cache_entry and cache_entry.loaded then
+                -- Показываем загруженное изображение
+                local success = ui.drawJPEG(15, cy + 5, cache_entry.path)
+                if not success then
+                    -- Если не удалось отобразить, показываем ошибку
+                    ui.text(20, cy + 60, "Display error", 1, 0xF800)
+                end
+            elseif cache_entry and cache_entry.failed then
+                -- Показываем ошибку
+                ui.text(20, cy + 60, "Load failed", 1, 0xF800)
+                if cache_entry.error then
+                    ui.text(20, cy + 80, cache_entry.error, 1, 0xF800)
+                end
+            elseif is_supported then
+                -- Показываем кнопку для загрузки
+                ui.text(20, cy + 60, "Click to load image", 1, 0x07FF)
+                
+                -- Примерный размер (если известен из атрибутов)
+                if item.url and item.url:match("%.(jpg|jpeg|png)$") then
+                    ui.text(20, cy + 80, "JPEG/PNG format", 1, 0x07E0)
+                end
+            else
+                -- Неподдерживаемый формат
+                ui.text(20, cy + 60, "Format not supported", 1, 0xF800)
+            end
+            
+            -- Делаем область кликабельной
             if ui.button(10, cy, SCR_W - 20, IMAGE_H, "", 0x0101) then
-                -- При клике на изображение можно открыть его в полный размер
-                -- или начать принудительную загрузку
-                if cache_entry and not cache_entry.loaded and not cache_entry.loading then
-                    load_image_to_cache(item.url)
+                -- Обрабатываем клик по изображению
+                if is_supported and item.image_url then
+                    if not cache_entry or (not cache_entry.loaded and not cache_entry.loading) then
+                        -- Начинаем загрузку
+                        load_image_to_cache(item.image_url)
+                    elseif cache_entry and cache_entry.failed then
+                        -- Пробуем снова
+                        load_image_to_cache(item.image_url)
+                    end
                 end
             end
             
@@ -541,13 +686,24 @@ function draw()
 
     ui.endList()
     
-    -- Информация о кэше
-    local loaded_count = 0
-    for _, cache_entry in pairs(image_cache) do
-        if cache_entry.loaded then loaded_count = loaded_count + 1 end
+    -- Индикатор загрузки в углу (если идет загрузка)
+    if image_loading.callback_active and image_loading.url then
+        ui.rect(SCR_W - 60, SCR_H - 40, 50, 30, 0x0000)
+        ui.text(SCR_W - 55, SCR_H - 35, "LOADING", 1, 0x07E0)
+        
+        -- Мини-прогресс-бар
+        local progress = image_loading.progress
+        ui.rect(SCR_W - 55, SCR_H - 20, 40, 8, 0x4208)
+        if progress > 0 then
+            local fill_width = math.floor(40 * progress / 100)
+            ui.rect(SCR_W - 55, SCR_H - 20, fill_width, 8, 0x07E0)
+        end
     end
-    if loaded_count > 0 then
-        ui.text(SCR_W - 100, SCR_H - 20, "Images: " .. loaded_count, 1, 0x07E0)
+    
+    -- Принудительное обновление экрана, если идет загрузка
+    -- Это поможет обновлять прогресс-бар
+    if image_loading.callback_active then
+        ui.flush()
     end
 end
 
@@ -555,6 +711,27 @@ end
 -- Создаем папку для кэша, если её нет
 if not fs.exists("/cache") then
     fs.mkdir("/cache")
+end
+
+-- Функция для периодической проверки состояния загрузки
+-- Вызывается из главного цикла для обновления UI
+local last_update = 0
+function check_download_progress()
+    local now = hw.millis()
+    
+    -- Обновляем UI раз в 100мс при активной загрузке
+    if image_loading.callback_active and now - last_update > 100 then
+        last_update = now
+        
+        -- Обновляем прогресс в кэше для текущего изображения
+        if image_loading.url and image_cache[image_loading.url] then
+            image_cache[image_loading.url].progress = image_loading.progress
+        end
+        
+        return true  -- Нужно перерисовать
+    end
+    
+    return false
 end
 
 -- Загружаем стартовую страницу
