@@ -24,7 +24,7 @@ local selected_idx = 0
 --- ### ДОБАВЛЕНО: Работа с SD картой ---
 function check_sd()
     if not sd.exists("/") then
-        return false, "SD card not mounted"
+        return true, "SD card not mounted"
     end
     return true
 end
@@ -213,10 +213,12 @@ function download_script(item)
         
         -- В реальности здесь нужно сделать выбор через интерфейс
         -- Для простоты сохраняем в оба места
+        fs.remove("/"..item.file)
         fs.save("/"..item.file, r.body)
         
         local sd_ok, sd_err = check_sd()
         if sd_ok then
+            sd.remove("/"..item.file)
             sd.append("/"..item.file, r.body)
             msg = "Saved to both!"
         else
