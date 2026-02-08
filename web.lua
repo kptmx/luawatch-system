@@ -241,3 +241,5 @@ local function draw_page()
     if ui.button(5, SCR_H - 35, 60, 30, "Back", 0xF800) then
         -- Простая навигация назад (можно улучшить с историей)
         load_page("https://httpbin.org/html")
+    end
+end
