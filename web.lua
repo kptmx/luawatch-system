@@ -736,7 +736,6 @@ function draw()
         ui.text(SCR_W - 40, SCR_H - 30, fps .. "fps", 1, 0x07E0)
         
         -- flush вызываем ТОЛЬКО здесь, один раз за кадр
-        ui.flush()
     end
 end
 
