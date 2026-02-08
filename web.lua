@@ -1,4 +1,4 @@
--- Простой веб-браузер на Lua (улучшенная версия с исправленным парсером)
+-- Простой веб-браузер на Lua (улучшенная версия с поддержкой JPEG)
 -- Исправления:
 -- • Полностью удаляются <script>, <style> и комментарии <!-- -->
 -- • Теги правильно захватываются целиком (с атрибутами), больше никаких остатков тегов в тексте
@@ -6,19 +6,24 @@
 -- • Игнорируются все теги кроме <a> и блочных (<p>, <div>, <br>, <li>, заголовки)
 -- • Блочные теги добавляют отступ (новая строка)
 -- • Текст очищается от лишних пробелов
+-- • Добавлена поддержка JPEG изображений через теги <img>
 
 local SCR_W, SCR_H = 410, 502
 local LINE_H = 28
 local LINK_H = 36
+local IMAGE_H = 120  -- Стандартная высота для изображений
 local MAX_CHARS_PER_LINE = 24
 
-local current_url = "https://www.furtails.pw"
+local current_url = "https://furaffinity.net"
 local history = {}
 local history_pos = 0
 local scroll_y = 0
 
 local content = {}
 local content_height = 0
+
+-- Кэш изображений (URL -> {loaded: bool, path: string})
+local image_cache = {}
 
 -- Разрешение относительных ссылок
 -- ==========================================
@@ -50,6 +55,7 @@ local function resolve_url(base, href)
     local path = base:match("^https?://[^/]+(.*/)") or "/"
     return proto .. domain .. path .. href
 end
+
 -- Вспомогательная функция для конвертации Unicode-кода в UTF-8 строку
 local function utf8_from_code(code)
     code = math.floor(code)
@@ -96,6 +102,7 @@ local function decode_html_entities(str)
         end
     end)
 end
+
 -- Очистка текста от мусора
 local function clean_text(txt)
     -- Заменяем любые пробельные символы (табы, переносы) на пробел
@@ -104,9 +111,8 @@ local function clean_text(txt)
 end
 
 -- Полное удаление скриптов и стилей
--- В Lua нет флага "multiline" для точки (.), поэтому используем трюк
 local function remove_junk(html)
-    -- Удаляем комментарии -- Используем цикл, так как gsub может зависнуть на сложном вложении
+    -- Удаляем комментарии
     local out = {}
     local i = 1
     while i <= #html do
@@ -123,7 +129,6 @@ local function remove_junk(html)
     html = table.concat(out)
 
     -- Удаляем <script>...</script> и <style>...</style>
-    -- Простой gsub тут плох, лучше удалить контент тегов
     local function strip_tag_content(text, tagname)
         local res = {}
         local pos = 1
@@ -149,9 +154,6 @@ local function remove_junk(html)
         return table.concat(res)
     end
 
-    -- Lua чувствителен к регистру в find, приведем временно к lower? 
-    -- Для простоты предположим стандартный HTML, но лучше сделать gsub с функцией
-    -- Ниже простой, но рабочий вариант:
     html = strip_tag_content(html, "script")
     html = strip_tag_content(html, "style")
     html = strip_tag_content(html, "SCRIPT") -- на всякий случай
@@ -164,15 +166,12 @@ end
 -- ==========================================
 
 -- Функция для подсчета реального количества символов (а не байт)
--- Русская "А" = 2 байта, но 1 символ ширины
 local function utf8_len(str)
-    -- Считаем все байты, которые НЕ являются продолжением мультибайтового символа (128-191)
     local _, count = string.gsub(str, "[^\128-\191]", "")
     return count
 end
 
 -- Функция для получения подстроки с учетом UTF-8 (аналог string.sub)
--- Нужна, чтобы не резать буквы пополам
 local function utf8_sub(str, i, j)
     local start_byte = 1
     local end_byte = #str
@@ -252,18 +251,23 @@ local function wrap_text(text)
     return lines
 end
 
--- Добавление контента (обновленная версия)
-function add_content(text, is_link, link_url)
+-- Добавление контента (обновленная версия с поддержкой изображений)
+function add_content(text, is_link, link_url, is_image)
     if not text or text == "" then return end
     
     local lines = wrap_text(text)
     for _, line in ipairs(lines) do
         table.insert(content, {
-            type = is_link and "link" or "text",
+            type = is_image and "image" or (is_link and "link" or "text"),
             text = line,
-            url = link_url
+            url = link_url,
+            alt_text = text  -- Для изображений сохраняем alt текст
         })
-        content_height = content_height + (is_link and LINK_H or LINE_H)
+        if is_image then
+            content_height = content_height + IMAGE_H + 10  -- +10 для отступа
+        else
+            content_height = content_height + (is_link and LINK_H or LINE_H)
+        end
     end
 end
 
@@ -271,21 +275,55 @@ end
 local function add_newline()
     -- Добавляем пустой отступ только если предыдущий элемент не был отступом
     if #content > 0 and content[#content].text ~= "" then
-         -- Просто добавляем "пустышку", чтобы сдвинуть Y координату при отрисовке
-         -- Или в вашей логике просто увеличиваем content_height?
-         -- Лучше добавим пустой элемент, чтобы список работал корректно
          table.insert(content, { type = "text", text = "", url = nil })
          content_height = content_height + (LINE_H / 2)
     end
 end
 
+-- Загрузка изображения в кэш
+local function load_image_to_cache(img_url)
+    if image_cache[img_url] then
+        return image_cache[img_url].loaded
+    end
+    
+    -- Инициализируем запись в кэше
+    image_cache[img_url] = {
+        loaded = false,
+        path = "/cache/" .. tostring(#image_cache + 1) .. ".jpg",
+        loading = false
+    }
+    
+    -- Начинаем асинхронную загрузку
+    local cache_entry = image_cache[img_url]
+    cache_entry.loading = true
+    
+    -- Функция для загрузки изображения
+    local function download_image()
+        local result = net.download(img_url, cache_entry.path, "flash")
+        cache_entry.loading = false
+        if result then
+            cache_entry.loaded = true
+            print("Image loaded: " .. img_url)
+        else
+            print("Failed to load image: " .. img_url)
+        end
+    end
+    
+    -- Запускаем загрузку (в идеале в отдельном потоке, но в Lua просто вызовем)
+    -- В реальности нужно использовать корутины или отложенную загрузку
+    download_image()
+    
+    return false  -- Пока не загружено
+end
+
 -- ==========================================
--- ОСНОВНОЙ ПАРСЕР
+-- ОСНОВНОЙ ПАРСЕР С ПОДДЕРЖКОЙ ИЗОБРАЖЕНИЙ
 -- ==========================================
 
 function parse_html(html)
     content = {}
     content_height = 60
+    image_cache = {}  -- Очищаем кэш изображений при новой странице
     
     html = remove_junk(html)
 
@@ -320,7 +358,6 @@ function parse_html(html)
         local tag_raw = html:sub(start_tag + 1, end_tag - 1)
         
         -- Определяем имя тега
-        -- Паттерн: возможно слэш, затем буквы/цифры
         local is_closing, tag_name = tag_raw:match("^(/?)([%w%-]+)")
         
         if tag_name then
@@ -336,7 +373,7 @@ function parse_html(html)
                     add_newline()
                 end
             else
-                -- Открывающий тег (<a ...>, <div>)
+                -- Открывающий тег
                 if tag_name == "a" then
                     -- Ищем href. Поддержка " и '
                     local href = tag_raw:match('href%s*=%s*"([^"]+)"') or 
@@ -345,6 +382,32 @@ function parse_html(html)
                     if href then
                         current_link = resolve_url(current_url, href)
                         if current_link then in_link = true end
+                    end
+                elseif tag_name == "img" then
+                    -- Обработка тега изображения
+                    local src = tag_raw:match('src%s*=%s*"([^"]+)"') or 
+                               tag_raw:match("src%s*=%s*'([^']+)'") or
+                               tag_raw:match('src%s*=%s*([^%s>]+)')
+                    
+                    local alt = tag_raw:match('alt%s*=%s*"([^"]+)"') or 
+                               tag_raw:match("alt%s*=%s*'([^']+)'") or
+                               "[Image]"
+                    
+                    if src then
+                        local img_url = resolve_url(current_url, src)
+                        if img_url then
+                            -- Проверяем, это JPEG или другое изображение
+                            if img_url:match("%.jpg$") or img_url:match("%.jpeg$") or 
+                               img_url:match("%.JPG$") or img_url:match("%.JPEG$") then
+                                -- Добавляем элемент изображения
+                                add_content(alt, false, img_url, true)
+                                -- Начинаем загрузку в кэш
+                                load_image_to_cache(img_url)
+                            else
+                                -- Для не-JPEG изображений показываем только alt текст
+                                add_content("[Image: " .. alt .. "]", false, img_url)
+                            end
+                        end
                     end
                 elseif tag_name == "br" then
                     add_newline()
@@ -357,6 +420,7 @@ function parse_html(html)
         pos = end_tag + 1
     end
 end
+
 -- Загрузка страницы
 function load_page(new_url)
     if not new_url:match("^https?://") then
@@ -387,21 +451,39 @@ local function go_back()
     end
 end
 
-load_page(current_url)
+-- Очистка кэша изображений при перезагрузке
+local function clear_image_cache()
+    for _, cache_entry in pairs(image_cache) do
+        if cache_entry.path then
+            fs.remove(cache_entry.path)
+        end
+    end
+    image_cache = {}
+end
 
--- Отрисовка
+-- Отрисовка с поддержкой изображений
 function draw()
     ui.rect(0, 0, SCR_W, SCR_H, 0)
 
     -- URL
-    ui.text(10, 12, current_url:sub(1, 65), 2, 0xFFFF)
+    local display_url = current_url
+    if utf8_len(display_url) > 50 then
+        display_url = utf8_sub(display_url, 1, 47) .. "..."
+    end
+    ui.text(10, 12, display_url, 2, 0xFFFF)
 
     -- Кнопки
     if history_pos > 1 then
         if ui.button(10, 52, 100, 40, "Back", 0x4208) then go_back() end
     end
-    if ui.button(120, 52, 130, 40, "Reload", 0x4208) then load_page(current_url) end
-    if ui.button(260, 52, 130, 40, "Home", 0x4208) then load_page("https://www.google.com") end
+    if ui.button(120, 52, 130, 40, "Reload", 0x4208) then 
+        clear_image_cache()
+        load_page(current_url) 
+    end
+    if ui.button(260, 52, 130, 40, "Home", 0x4208) then 
+        clear_image_cache()
+        load_page("https://www.furtails.pw") 
+    end
 
     -- Контент
     scroll_y = ui.beginList(0, 100, SCR_W, SCR_H - 100, scroll_y, content_height)
@@ -409,17 +491,71 @@ function draw()
     local cy = 20
     for _, item in ipairs(content) do
         if item.type == "text" then
-            ui.text(20, cy, item.text, 2, 0xFFFF)
-            cy = cy + LINE_H
-        else
+            if item.text ~= "" then
+                ui.text(20, cy, item.text, 2, 0xFFFF)
+                cy = cy + LINE_H
+            else
+                cy = cy + LINE_H / 2  -- Пустой отступ
+            end
+        elseif item.type == "link" then
             local clicked = ui.button(10, cy, SCR_W - 20, LINK_H, "", 0x0101)
             ui.text(25, cy + 6, item.text, 2, 0x07FF)
             if clicked then
+                clear_image_cache()
                 load_page(item.url)
             end
             cy = cy + LINK_H
+        elseif item.type == "image" then
+            -- Фон для изображения
+            ui.rect(10, cy, SCR_W - 20, IMAGE_H, 0x2104)
+            
+            -- Проверяем, загружено ли изображение
+            local cache_entry = image_cache[item.url]
+            if cache_entry and cache_entry.loaded then
+                -- Показываем JPEG изображение
+                local success = ui.drawJPEG(15, cy + 5, cache_entry.path)
+                if not success then
+                    -- Если не удалось отобразить, показываем placeholder
+                    ui.text(20, cy + 50, "[Image: " .. item.text .. "]", 1, 0xFFFF)
+                end
+            elseif cache_entry and cache_entry.loading then
+                -- Показываем индикатор загрузки
+                ui.text(20, cy + 50, "Loading image...", 1, 0x07E0)
+            else
+                -- Показываем alt текст
+                ui.text(20, cy + 50, "[Image: " .. item.text .. "]", 1, 0xFFFF)
+            end
+            
+            -- Делаем изображение кликабельным (для просмотра или загрузки)
+            if ui.button(10, cy, SCR_W - 20, IMAGE_H, "", 0x0101) then
+                -- При клике на изображение можно открыть его в полный размер
+                -- или начать принудительную загрузку
+                if cache_entry and not cache_entry.loaded and not cache_entry.loading then
+                    load_image_to_cache(item.url)
+                end
+            end
+            
+            cy = cy + IMAGE_H + 10  -- +10 для отступа после изображения
         end
     end
 
     ui.endList()
+    
+    -- Информация о кэше
+    local loaded_count = 0
+    for _, cache_entry in pairs(image_cache) do
+        if cache_entry.loaded then loaded_count = loaded_count + 1 end
+    end
+    if loaded_count > 0 then
+        ui.text(SCR_W - 100, SCR_H - 20, "Images: " .. loaded_count, 1, 0x07E0)
+    end
 end
+
+-- Инициализация при запуске
+-- Создаем папку для кэша, если её нет
+if not fs.exists("/cache") then
+    fs.mkdir("/cache")
+end
+
+-- Загружаем стартовую страницу
+load_page(current_url)
