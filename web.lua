@@ -636,7 +636,7 @@ end
 function Browser.run()
     -- Начальная страница
     if Browser.url == "" then
-        Browser.loadPage("http://www.google.com")
+        Browser.loadPage("www.google.com")
     end
     
     -- Главный цикл
