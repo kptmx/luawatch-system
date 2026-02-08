@@ -24,7 +24,7 @@ local selected_idx = 0
 --- ### ДОБАВЛЕНО: Работа с SD картой ---
 function check_sd()
     if not sd.exists("/") then
-        return true, "SD card not mounted"
+        return false, "SD card not mounted"
     end
     return true
 end
