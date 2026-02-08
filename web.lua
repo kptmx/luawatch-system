@@ -1,444 +1,398 @@
 -- Простой веб-браузер для LuaWatch
--- Автор: ChatGPT
+-- Сохранить как /main.lua или запустить через recovery mode
 
 -- Константы экрана
 local SCR_W, SCR_H = 410, 502
 
 -- Состояние браузера
-local history = {}        -- История посещений (URLs)
-local history_index = 0   -- Текущая позиция в истории
-local current_url = ""    -- Текущий URL
-local page_content = ""   -- Загруженный контент страницы
-local page_title = "Browser"
-local scroll_pos = 0      -- Позиция скролла
-local max_scroll = 0
-local loading = false     -- Идет загрузка
-local error_msg = ""      -- Сообщение об ошибке
-
--- Настройки
-local settings = {
-    font_size = 2,
-    line_height = 20,
-    margin = 10,
-    max_lines = 1000      -- Максимальное количество строк для парсинга
+local state = {
+    url = "https://text.npr.org/",  -- Начнем с текстовой версии NPR
+    content = "",
+    links = {},                    -- Массив ссылок {text=..., url=...}
+    scroll = 0,
+    max_scroll = 0,
+    page_height = 0,
+    status = "Ready",
+    history = {},                  -- История URL
+    history_index = 1,
+    loading = false,
+    page_title = ""
 }
-
--- Начальная страница
-local homepage = "https://furtails.pw"
 
 -- Цвета
-local colors = {
-    bg = 0x0000,          -- Черный фон
-    text = 0xFFFF,        -- Белый текст
-    link = 0x07FF,        -- Голубые ссылки
-    title = 0xF800,       -- Красный заголовок
-    url_bar = 0x3186,     -- Темно-синий бар
-    button = 0x8410,      -- Серые кнопки
-    button_active = 0xEF5D, -- Оранжевые активные кнопки
-    loading = 0xFFE0,     -- Желтый индикатор загрузки
-    error = 0xF800        -- Красный для ошибок
+local COLORS = {
+    bg = 0x0000,        -- Черный
+    text = 0xFFFF,      -- Белый
+    link = 0x07FF,      -- Голубой
+    visited = 0xA81F,   -- Фиолетовый
+    title_bg = 0x3186,  -- Темно-синий
+    status_bg = 0x632C, -- Темно-серый
+    button = 0x8410,    -- Серый
+    button_active = 0x07E0, -- Зеленый
+    scrollbar = 0x8410
 }
 
--- Упрощенный HTML парсер (только текст и ссылки)
-function parse_html(content)
-    local lines = {}
-    local links = {}
-    local in_tag = false
-    local in_script = false
-    local in_style = false
-    local current_line = ""
-    local link_text = ""
-    local link_url = ""
-    local in_link = false
-    local in_title = false
-    
-    -- Простейший парсинг HTML
-    for i = 1, #content do
-        local char = content:sub(i, i)
-        
-        if char == "<" then
-            in_tag = true
-            local tag_end = content:find(">", i)
-            if tag_end then
-                local tag = content:sub(i, tag_end):lower()
-                
-                -- Закрывающие теги
-                if tag:find("</script") then in_script = false
-                elseif tag:find("</style") then in_style = false
-                elseif tag:find("</a") then
-                    if in_link and link_text ~= "" and link_url ~= "" then
-                        table.insert(links, {
-                            text = link_text,
-                            url = link_url,
-                            line = #lines + 1,
-                            pos = #current_line
-                        })
-                    end
-                    in_link = false
-                    link_text = ""
-                    link_url = ""
-                elseif tag:find("</title") then in_title = false
-                
-                -- Открывающие теги
-                elseif tag:find("<script") then in_script = true
-                elseif tag:find("<style") then in_style = true
-                elseif tag:find("<a ") then
-                    in_link = true
-                    -- Извлекаем href
-                    local href_start = tag:find("href=")
-                    if href_start then
-                        local quote = tag:sub(href_start + 5, href_start + 5)
-                        if quote == '"' or quote == "'" then
-                            local href_end = tag:find(quote, href_start + 6)
-                            if href_end then
-                                link_url = tag:sub(href_start + 6, href_end - 1)
-                                -- Преобразуем относительные ссылки
-                                if link_url:sub(1, 1) == "/" and current_url ~= "" then
-                                    local base = current_url:match("^(https?://[^/]+)")
-                                    if base then
-                                        link_url = base .. link_url
-                                    end
-                                elseif link_url:sub(1, 4) ~= "http" and current_url ~= "" then
-                                    local base = current_url:match("^(.*)/[^/]*$") or current_url
-                                    if base then
-                                        link_url = base .. "/" .. link_url
-                                    end
-                                end
-                            end
-                        end
-                    end
-                elseif tag:find("<title") then in_title = true
-                elseif tag:find("<br") or tag:find("<p") or tag:find("<div") then
-                    -- Новые строки
-                    if #current_line > 0 then
-                        table.insert(lines, current_line)
-                        current_line = ""
-                    end
-                elseif tag:find("</p") or tag:find("</div") then
-                    if #current_line > 0 then
-                        table.insert(lines, current_line)
-                        current_line = ""
-                    end
-                end
-                
-                i = tag_end
-                in_tag = false
-            end
-        elseif not in_tag and not in_script and not in_style then
-            if char == "&" then
-                -- Простые HTML entity
-                local entity_end = content:find(";", i)
-                if entity_end then
-                    local entity = content:sub(i, entity_end)
-                    if entity == "&lt;" then char = "<"
-                    elseif entity == "&gt;" then char = ">"
-                    elseif entity == "&amp;" then char = "&"
-                    elseif entity == "&quot;" then char = '"'
-                    elseif entity == "&apos;" then char = "'"
-                    elseif entity == "&nbsp;" then char = " "
-                    else char = " " -- Неизвестная entity
-                    end
-                    i = entity_end
-                end
-            end
-            
-            if char == "\n" or char == "\r" then
-                -- Игнорируем переводы строк в HTML
-            else
-                if in_link then
-                    link_text = link_text .. char
-                end
-                
-                if in_title then
-                    page_title = page_title .. char
-                end
-                
-                -- Добавляем символ в текущую строку
-                current_line = current_line .. char
-                
-                -- Ограничиваем длину строки
-                if #current_line > 60 then
-                    table.insert(lines, current_line)
-                    current_line = ""
-                end
-            end
-        end
-    end
-    
-    -- Добавляем последнюю строку
-    if #current_line > 0 then
-        table.insert(lines, current_line)
-    end
-    
-    -- Обрезаем количество строк
-    if #lines > settings.max_lines then
-        lines = {table.unpack(lines, 1, settings.max_lines)}
-        table.insert(lines, "[... content truncated ...]")
-    end
-    
-    return lines, links
-end
+-- Размеры UI
+local UI = {
+    title_h = 30,
+    status_h = 30,
+    scrollbar_w = 8,
+    padding = 10
+}
 
--- Парсинг простого текста (для Markdown и plain text)
-function parse_text(content)
-    local lines = {}
-    
-    for line in content:gmatch("[^\r\n]+") do
-        -- Убираем лишние пробелы
-        line = line:gsub("^%s+", ""):gsub("%s+$", "")
-        
-        if #line > 0 then
-            -- Разбиваем длинные строки
-            while #line > 60 do
-                table.insert(lines, line:sub(1, 60))
-                line = line:sub(61)
-            end
-            if #line > 0 then
-                table.insert(lines, line)
-            end
-        else
-            table.insert(lines, "") -- Пустая строка
-        end
-    end
-    
-    -- Обрезаем количество строк
-    if #lines > settings.max_lines then
-        lines = {table.unpack(lines, 1, settings.max_lines)}
-        table.insert(lines, "[... content truncated ...]")
-    end
-    
-    return lines, {}
-end
+-- Кэш посещенных ссылок
+local visited_urls = {}
 
--- Загрузка страницы
-function load_url(url)
-    if url == "" then return end
-    
-    -- Добавляем протокол если нет
-    if not url:find("^https?://") then
-        url = "http://" .. url
-    end
-    
-    current_url = url
-    loading = true
-    error_msg = ""
-    scroll_pos = 0
-    
-    -- Добавляем в историю
-    table.insert(history, url)
-    history_index = #history
-    
-    -- Показываем сообщение о загрузке
-    page_content = "Loading..."
-    
-    -- Загружаем страницу
-    local res = net.get(url)
-    
-    if res and res.ok and res.body then
-        if #res.body < 10000 then -- Проверяем размер
-            -- Определяем тип контента
-            if res.body:find("<!DOCTYPE") or res.body:find("<html") then
-                -- HTML страница
-                page_title = "Web Page"
-                local lines, links = parse_html(res.body)
-                page_content = lines
-                page_links = links
-            else
-                -- Текстовый контент
-                page_title = "Text Document"
-                local lines, links = parse_text(res.body)
-                page_content = lines
-                page_links = links
-            end
-        else
-            error_msg = "Page too large (" .. #res.body .. " bytes)"
-            page_content = {"[Page too large to display]"}
-        end
-    else
-        error_msg = res and res.err or "Unknown error"
-        page_content = {"[Failed to load page]"}
-    end
-    
-    loading = false
-    
-    -- Рассчитываем максимальный скролл
-    if type(page_content) == "table" then
-        max_scroll = math.max(0, #page_content * settings.line_height - (SCR_H - 80))
-    else
-        max_scroll = 0
-    end
-end
-
--- Отображение страницы
-function draw_page()
-    local start_y = 80 - scroll_pos
-    local content_height = SCR_H - 80
-    
+-- Основной экран браузера
+function draw_browser()
     -- Фон
-    ui.rect(0, 0, SCR_W, SCR_H, colors.bg)
+    ui.rect(0, 0, SCR_W, SCR_H, COLORS.bg)
     
-    -- Заголовок
-    ui.text(10, 10, page_title, settings.font_size, colors.title)
+    -- Заголовок (URL бар)
+    ui.rect(0, 0, SCR_W, UI.title_h, COLORS.title_bg)
+    local display_url = state.url
+    if #display_url > 40 then
+        display_url = "..." .. display_url:sub(-37)
+    end
+    ui.text(UI.padding, 8, display_url, 1, COLORS.text)
     
-    -- URL бар
-    ui.rect(0, 40, SCR_W, 30, colors.url_bar)
-    ui.text(10, 45, current_url:sub(1, 50), 1, colors.text)
-    
-    -- Индикатор загрузки/ошибки
-    if loading then
-        ui.text(SCR_W - 100, 45, "Loading...", 1, colors.loading)
-    elseif error_msg ~= "" then
-        ui.text(SCR_W - 100, 45, "Error", 1, colors.error)
+    -- Кнопка НАЗАД
+    if ui.button(SCR_W - 50, 5, 45, 20, "BACK", COLORS.button) then
+        go_back()
     end
     
-    -- Контент
-    if type(page_content) == "table" then
-        for i, line in ipairs(page_content) do
-            local y = start_y + (i-1) * settings.line_height
+    -- Область контента (с отступами для скроллбара)
+    local content_x = UI.padding
+    local content_y = UI.title_h + UI.padding
+    local content_w = SCR_W - UI.padding * 2 - UI.scrollbar_w
+    local content_h = SCR_H - UI.title_h - UI.status_h - UI.padding * 2
+    
+    -- Область скролла контента
+    local scroll_y = ui.beginList(content_x, content_y, content_w, content_h, 
+                                 state.scroll, state.page_height)
+    if scroll_y ~= state.scroll then
+        state.scroll = scroll_y
+    end
+    
+    -- Отрисовка текста контента
+    if state.content ~= "" then
+        local y = 0
+        local line_h = 12
+        local wrap_w = content_w - UI.padding
+        
+        -- Парсим контент по строкам
+        local lines = {}
+        for line in state.content:gmatch("[^\n]+") do
+            -- Проверяем, не ссылка ли это
+            local is_link = false
+            local link_text, link_url = "", ""
             
-            -- Проверяем видимость строки
-            if y >= 80 and y < SCR_H - 10 then
-                -- Проверяем, есть ли ссылка на этой строке
-                local link_color = colors.text
-                for _, link in ipairs(page_links or {}) do
-                    if link.line == i then
-                        link_color = colors.link
-                        break
+            for _, link in ipairs(state.links) do
+                if line:find(link.text, 1, true) then
+                    is_link = true
+                    link_text = link.text
+                    link_url = link.url
+                    break
+                end
+            end
+            
+            if is_link then
+                -- Рисуем ссылку
+                local color = visited_urls[link_url] and COLORS.visited or COLORS.link
+                if ui.button(0, y, wrap_w, line_h, link_text, color) then
+                    navigate_to(link_url)
+                end
+                y = y + line_h + 2
+            else
+                -- Обертка текста
+                local words = {}
+                for word in line:gmatch("%S+") do
+                    table.insert(words, word)
+                end
+                
+                local current_line = ""
+                for _, word in ipairs(words) do
+                    -- Проверяем ширину текста (грубое приближение)
+                    local test_line = current_line .. (current_line == "" and "" or " ") .. word
+                    if #test_line * 6 > wrap_w then
+                        -- Выводим текущую строку
+                        ui.text(0, y, current_line, 1, COLORS.text)
+                        y = y + line_h
+                        current_line = word
+                    else
+                        current_line = test_line
                     end
                 end
                 
-                ui.text(settings.margin, y, line, 1, link_color)
-            elseif y > SCR_H then
-                break -- Выходим если ниже экрана
+                if current_line ~= "" then
+                    ui.text(0, y, current_line, 1, COLORS.text)
+                    y = y + line_h
+                end
             end
         end
+        
+        -- Обновляем высоту страницы
+        state.page_height = y
     else
-        ui.text(settings.margin, start_y, page_content, 2, colors.text)
+        ui.text(0, 0, "No content", 2, COLORS.text)
+        state.page_height = 0
     end
-    
-    -- Скроллбар
-    if max_scroll > 0 then
-        local scroll_height = math.max(20, content_height * content_height / (#page_content * settings.line_height))
-        local scroll_y = 80 + (scroll_pos / max_scroll) * (content_height - scroll_height)
-        ui.rect(SCR_W - 10, scroll_y, 8, scroll_height, colors.button)
-    end
-end
-
--- Обработка кликов по ссылкам
-function handle_click(x, y)
-    if type(page_content) ~= "table" then return end
-    
-    local content_y = y - 80 + scroll_pos
-    local line_index = math.floor(content_y / settings.line_height) + 1
-    
-    if line_index >= 1 and line_index <= #page_content then
-        -- Проверяем клик по ссылке
-        for _, link in ipairs(page_links or {}) do
-            if link.line == line_index then
-                -- Загружаем ссылку
-                load_url(link.url)
-                return true
-            end
-        end
-    end
-    
-    return false
-end
-
--- Отрисовка UI
-function draw()
-    -- Область контента для скролла
-    local scroll_area = ui.beginList(0, 80, SCR_W, SCR_H - 80, scroll_pos, 
-                                     type(page_content) == "table" and #page_content * settings.line_height or 100)
-    scroll_pos = scroll_area
-    
-    -- Рисуем страницу
-    draw_page()
     
     ui.endList()
     
-    -- Нижняя панель навигации
-    ui.rect(0, SCR_H - 40, SCR_W, 40, colors.url_bar)
+    -- Скроллбар
+    if state.page_height > content_h then
+        local scrollbar_h = math.max(20, content_h * content_h / state.page_height)
+        local scrollbar_y = content_y + (state.scroll * (content_h - scrollbar_h) / 
+                                       (state.page_height - content_h))
+        
+        ui.rect(SCR_W - UI.scrollbar_w - UI.padding, scrollbar_y, 
+                UI.scrollbar_w, scrollbar_h, COLORS.scrollbar)
+    end
     
-    -- Кнопка Назад
-    if ui.button(10, SCR_H - 35, 60, 30, "Back", colors.button) then
-        if history_index > 1 then
-            history_index = history_index - 1
-            load_url(history[history_index])
+    -- Статус бар
+    local status_y = SCR_H - UI.status_h
+    ui.rect(0, status_y, SCR_W, UI.status_h, COLORS.status_bg)
+    
+    if state.loading then
+        ui.text(UI.padding, status_y + 8, "Loading...", 1, 0x07E0)
+    else
+        local status_text = state.status
+        if #status_text > 50 then
+            status_text = status_text:sub(1, 47) .. "..."
         end
+        ui.text(UI.padding, status_y + 8, status_text, 1, COLORS.text)
     end
     
-    -- Кнопка Вперед
-    if ui.button(80, SCR_H - 35, 60, 30, "Next", colors.button) then
-        if history_index < #history then
-            history_index = history_index + 1
-            load_url(history[history_index])
+    -- Кнопки управления внизу
+    local btn_y = status_y - 35
+    if ui.button(UI.padding, btn_y, 80, 30, "RELOAD", COLORS.button) then
+        load_page(state.url)
+    end
+    
+    if ui.button(UI.padding + 90, btn_y, 80, 30, "HOME", COLORS.button) then
+        navigate_to("https://text.npr.org/")
+    end
+    
+    -- Кнопка ввода URL
+    if ui.button(UI.padding + 180, btn_y, 120, 30, "ENTER URL", COLORS.button_active) then
+        show_url_input()
+    end
+end
+
+-- Загрузка страницы
+function load_page(url)
+    state.loading = true
+    state.status = "Loading " .. url
+    
+    local result = net.get(url)
+    
+    state.loading = false
+    
+    if result and result.ok and result.code == 200 then
+        state.content = result.body or ""
+        state.url = url
+        state.scroll = 0
+        state.status = "Loaded " .. url
+        visited_urls[url] = true
+        
+        -- Парсим ссылки (упрощенный парсинг для текстовых страниц)
+        parse_links(state.content)
+        
+        -- Сохраняем в историю
+        table.insert(state.history, url)
+        state.history_index = #state.history
+        
+        -- Пытаемся извлечь заголовок
+        local title = state.content:match("<title>(.-)</title>")
+        if title then
+            state.page_title = title:gsub("%s+", " "):sub(1, 50)
+            state.status = state.status .. " - " .. state.page_title
         end
-    end
-    
-    -- Кнопка Обновить
-    if ui.button(150, SCR_H - 35, 60, 30, "Reload", colors.button) then
-        if current_url ~= "" then
-            load_url(current_url)
-        end
-    end
-    
-    -- Кнопка Домой
-    if ui.button(220, SCR_H - 35, 60, 30, "Home", colors.button) then
-        load_url(homepage)
-    end
-    
-    -- Поле ввода URL
-    local url_input = ui.input(290, SCR_H - 35, 110, 30, "Go to:", false)
-    if url_input then
-        -- Открываем клавиатуру для ввода URL
-        local new_url = input_dialog("Enter URL:", current_url)
-        if new_url and new_url ~= "" then
-            load_url(new_url)
+        
+    else
+        local err = result and result.err or "Unknown error"
+        state.status = "Error: " .. err
+        if result and result.code then
+            state.status = state.status .. " (Code: " .. result.code .. ")"
         end
     end
 end
 
--- Диалог ввода текста
-function input_dialog(title, default)
-    local input_text = default or ""
-    local result = nil
-    local exit_dialog = false
+-- Упрощенный парсинг ссылок
+function parse_links(html)
+    state.links = {}
     
-    while not exit_dialog do
+    -- Ищем ссылки в формате <a href="...">текст</a>
+    for link_text, link_url in html:gmatch('<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>') do
+        -- Убираем лишние пробелы
+        link_text = link_text:gsub("%s+", " "):trim()
+        link_url = link_url:trim()
+        
+        -- Делаем абсолютный URL если нужно
+        if not link_url:find("^https?://") then
+            if link_url:find("^//") then
+                link_url = "https:" .. link_url
+            elseif link_url:find("^/") then
+                local base = state.url:match("(https?://[^/]+)")
+                if base then
+                    link_url = base .. link_url
+                end
+            else
+                -- Относительный URL
+                local base = state.url:match("(.-/[^/]*)$")
+                if base then
+                    link_url = base .. link_url
+                end
+            end
+        end
+        
+        if link_text ~= "" and link_url ~= "" then
+            table.insert(state.links, {
+                text = link_text,
+                url = link_url
+            })
+        end
+    end
+    
+    -- Также ищем ссылки в текстовом формате (для text.npr.org)
+    for link_url in html:gmatch("(https?://[%w%.%-/_?=%%&]+)") do
+        -- Берем последний сегмент как текст
+        local text = link_url:match("/([^/]+)$") or link_url:match("://([^/]+)") or link_url
+        text = text:sub(1, 40)
+        
+        table.insert(state.links, {
+            text = text,
+            url = link_url
+        })
+    end
+    
+    state.status = state.status .. string.format(" (%d links found)", #state.links)
+end
+
+-- Навигация на URL
+function navigate_to(url)
+    if url and url ~= "" and url ~= state.url then
+        load_page(url)
+    end
+end
+
+-- Назад по истории
+function go_back()
+    if state.history_index > 1 then
+        state.history_index = state.history_index - 1
+        load_page(state.history[state.history_index])
+    end
+end
+
+-- Экран ввода URL
+function show_url_input()
+    local input_url = state.url
+    local input_active = true
+    
+    while input_active do
+        -- Фон
         ui.rect(0, 0, SCR_W, SCR_H, 0x0000)
-        ui.text(SCR_W/2 - 50, 50, title, 2, 0xFFFF)
+        ui.rect(0, 0, SCR_W, 40, 0x3186)
+        ui.text(10, 12, "Enter URL:", 2, 0xFFFF)
         
         -- Поле ввода
-        ui.rect(50, 100, SCR_W - 100, 40, 0x3186)
-        ui.text(60, 110, input_text, 2, 0xFFFF)
+        if ui.input(10, 50, SCR_W - 20, 40, input_url, true) then
+            -- Обновление URL при клике (простейший ввод)
+            input_url = string_input(input_url, "URL")
+        end
         
-        -- Простая клавиатура
-        local keys = {
-            "abcdefghij", "klmnopqrst", "uvwxyz.-:/",
-            "0123456789", "DELETE", "CLEAR", "OK"
+        -- Кнопки
+        if ui.button(10, 100, 120, 40, "GO", 0x07E0) then
+            if input_url ~= "" then
+                if not input_url:find("^https?://") then
+                    input_url = "https://" .. input_url
+                end
+                state.url = input_url
+                input_active = false
+            end
+        end
+        
+        if ui.button(140, 100, 120, 40, "CANCEL", 0xF800) then
+            input_active = false
+        end
+        
+        -- Предложения
+        ui.text(10, 160, "Suggestions:", 2, 0xFFFF)
+        
+        local suggestions = {
+            "text.npr.org",
+            "lite.cnn.com",
+            "www.bbc.com",
+            "news.ycombinator.com",
+            "wikipedia.org"
         }
         
-        for i, row in ipairs(keys) do
-            local cols = {}
-            for c in row:gmatch(".") do
-                table.insert(cols, c)
-            end
+        for i, sug in ipairs(suggestions) do
+            local x = 10 + ((i-1) % 2) * 200
+            local y = 190 + math.floor((i-1)/2) * 45
             
-            for j, key in ipairs(cols) do
-                local x = 20 + (j-1) * 90
-                local y = 160 + (i-1) * 45
+            if ui.button(x, y, 190, 40, sug, 0x8410) then
+                input_url = "https://" .. sug
+            end
+        end
+        
+        ui.flush()
+    end
+    
+    -- Загружаем выбранную страницу
+    if state.url ~= input_url then
+        load_page(state.url)
+    end
+end
+
+-- Простейший ввод строки (симуляция клавиатуры)
+function string_input(current, label)
+    local result = current
+    local keys = {
+        {"q","w","e","r","t","y","u","i","o","p","DEL"},
+        {"a","s","d","f","g","h","j","k","l",";","'"}, 
+        {"z","x","c","v","b","n","m",".",",","/","BS"},
+        {"SPACE","https://","www.",".com",".org","OK"}
+    }
+    
+    while true do
+        -- Фон
+        ui.rect(0, 0, SCR_W, SCR_H, 0x0000)
+        ui.rect(0, 0, SCR_W, 60, 0x3186)
+        ui.text(10, 20, label .. ":", 2, 0xFFFF)
+        ui.text(10, 40, result, 1, 0xFFFF)
+        
+        -- Клавиатура
+        local key_w = 35
+        local key_h = 40
+        local start_y = 70
+        
+        for row_idx, row in ipairs(keys) do
+            for col_idx, key in ipairs(row) do
+                local x = 5 + (col_idx-1) * (key_w + 5)
+                local y = start_y + (row_idx-1) * (key_h + 5)
+                local w = key_w
                 
-                if ui.button(x, y, 80, 40, key, 0x8410) then
-                    if key == "DELETE" then
-                        input_text = input_text:sub(1, -2)
-                    elseif key == "CLEAR" then
-                        input_text = ""
+                -- Широкие клавиши
+                if key == "DEL" or key == "BS" then w = w + 20 end
+                if key == "SPACE" then w = w * 3 + 10 end
+                if key:find("%.") then w = w + 15 end
+                if key == "OK" then w = w + 20 end
+                
+                if ui.button(x, y, w, key_h, key, 0x8410) then
+                    if key == "DEL" then
+                        result = result:sub(1, -2)
+                    elseif key == "BS" then
+                        result = ""
+                    elseif key == "SPACE" then
+                        result = result .. " "
                     elseif key == "OK" then
-                        result = input_text
-                        exit_dialog = true
+                        return result
+                    elseif key:find("^https?://") or key:find("^www%.") or key:find("^%.") then
+                        result = result .. key
                     else
-                        input_text = input_text .. key
+                        result = result .. key
                     end
                 end
             end
@@ -450,68 +404,41 @@ function input_dialog(title, default)
     return result
 end
 
--- Обработка касаний для скролла
-local last_touch_y = 0
-local is_dragging = false
-local scroll_velocity = 0
-
-function on_touch(touch)
-    if touch.touching then
-        if not is_dragging then
-            last_touch_y = touch.y
-            is_dragging = true
-        else
-            local delta = last_touch_y - touch.y
-            scroll_pos = scroll_pos + delta
-            
-            -- Ограничиваем скролл
-            if scroll_pos < 0 then scroll_pos = 0 end
-            if scroll_pos > max_scroll then scroll_pos = max_scroll end
-            
-            last_touch_y = touch.y
-            scroll_velocity = delta
-        end
-        
-        -- Проверяем клик по ссылке (при отпускании)
-        if touch.released then
-            if scroll_velocity == 0 or math.abs(scroll_velocity) < 5 then
-                handle_click(touch.x, touch.y)
-            end
-        end
-    else
-        is_dragging = false
-        
-        -- Инерционный скролл
-        if math.abs(scroll_velocity) > 0.5 then
-            scroll_pos = scroll_pos + scroll_velocity
-            scroll_velocity = scroll_velocity * 0.92
-            
-            -- Ограничиваем скролл
-            if scroll_pos < 0 then 
-                scroll_pos = 0
-                scroll_velocity = 0
-            end
-            if scroll_pos > max_scroll then 
-                scroll_pos = max_scroll
-                scroll_velocity = 0
-            end
-        end
-    end
-end
-
--- Основной цикл
-function main()
-    -- Загружаем домашнюю страницу
-    load_url(homepage)
+-- Инициализация
+function init()
+    state.status = "Initializing..."
     
-    -- Главный цикл
-    while true do
-        local touch = ui.getTouch()
-        on_touch(touch)
-        draw()
-        ui.flush()
+    -- Проверяем соединение
+    local wifi_status = net.status()
+    if wifi_status == 3 then
+        state.status = "Connected to WiFi, loading page..."
+        load_page(state.url)
+    else
+        state.status = "Not connected to WiFi. Use recovery mode to setup."
+        
+        -- Предлагаем перейти в recovery mode
+        if ui.button(100, 200, 200, 50, "RECOVERY MODE", 0xF800) then
+            -- Сбрасываем в recovery (через перезагрузку с зажатой кнопкой)
+            hw.reboot()
+        end
     end
 end
 
--- Запуск браузера
-main()
+-- Главный цикл
+function draw()
+    if state.url then
+        draw_browser()
+    else
+        -- Экран приветствия
+        ui.rect(0, 0, SCR_W, SCR_H, 0x0000)
+        ui.text(100, 50, "Simple Browser", 3, 0xFFFF)
+        ui.text(50, 100, "Press any key to start", 2, 0xFFFF)
+        
+        if ui.button(100, 200, 200, 50, "START", 0x07E0) then
+            init()
+        end
+    end
+end
+
+-- Запуск
+init()
