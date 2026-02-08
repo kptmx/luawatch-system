@@ -1,303 +1,241 @@
--- webbrowser.lua
--- Простой веб-браузер с T9-клавиатурой для ESP32-S3 (410×502)
+-- webbrowser.lua (исправленная версия для ESP32-S3 410x502)
+-- Простой веб-браузер с T9 и JPEG
 
-local SCR_H = 502
 local SCR_W = 410
+local SCR_H = 502
 
 local current_url = "http://example.com"
-local history = {}
-local history_pos = 0
 local page_content = ""
 local scroll_y = 0
-local max_scroll = 0
+local input_text = ""
+local input_focused = false
 
--- Цветовая схема
-local COLOR_BG      = 0x000000
-local COLOR_TEXT    = 0xFFFFFF
-local COLOR_LINK    = 0x88CCFF
-local COLOR_BTN     = 0x444488
-local COLOR_BTN_ACT = 0x6666CC
-local COLOR_INPUT   = 0x222244
-local COLOR_INPUT_T = 0x88FF88
+-- Цвета (RGB565)
+local COLOR_BG     = 0x0000
+local COLOR_TEXT   = 0xFFFF
+local COLOR_LINK   = 0xC618
+local COLOR_BTN    = 0x4208
+local COLOR_BTN_ACT= 0x636C
+local COLOR_INPUT  = 0x2121
+local COLOR_INPUT_T= 0x8FE0
 
--- T9 клавиатура
+-- T9 клавиатура (4 ряда для компактности)
 local t9_layout = {
-    {"1",".,?!","@","#","$","%","^","&","*","(",")"},
-    {"2","a","b","c"},
-    {"3","d","e","f"},
-    {"4","g","h","i"},
-    {"5","j","k","l"},
-    {"6","m","n","o"},
-    {"7","p","q","r","s"},
-    {"8","t","u","v"},
-    {"9","w","x","y","z"},
-    {"0"," ","_","-","/"},
-    {"*","←"},      -- backspace
-    {"#","OK"}      -- enter
+    {".","1","abc","def","ghi"},
+    {"jkl","mno","pqrs","tuv","wxyz"},
+    {"0"," ","←","OK"},
+    {"http://",".com","Go","Back"}
 }
 
 local t9_current_key = nil
 local t9_char_index = 1
 local t9_timer = 0
-local T9_TIMEOUT = 1200     -- ms
+local T9_TIMEOUT = 1000
+local last_touch_y = 0
 
--- Состояние ввода
-local input_text = current_url
-local input_focused = false
+-- История (простая)
+local history = {"http://example.com"}
+local history_idx = 1
 
--- Кнопки интерфейса
-local buttons = {
-    {x=10,  y=SCR_H-80, w=90, h=70, text="Back",    action="back"},
-    {x=110, y=SCR_H-80, w=90, h=70, text="Home",    action="home"},
-    {x=210, y=SCR_H-80, w=90, h=70, text="Refresh", action="refresh"},
-    {x=310, y=SCR_H-80, w=90, h=70, text="Go",      action="go"}
-}
-
--- История навигации
-local function push_history(url)
-    if history_pos < #history then
-        for i = history_pos+1, #history do
-            history[i] = nil
-        end
-    end
-    table.insert(history, url)
-    history_pos = #history
-end
-
-local function go_back()
-    if history_pos > 1 then
-        history_pos = history_pos - 1
-        current_url = history[history_pos]
-        load_page(current_url)
-    end
-end
-
-local function go_home()
-    current_url = "http://example.com"
-    push_history(current_url)
-    load_page(current_url)
-end
-
--- Упрощённый загрузчик страницы
-function load_page(url)
-    if not url or url == "" then return end
-    
-    ui.flush()
-    ui.text(10, 10, "Loading...", 24, 0xFFFF00)
-    ui.flush()
-    
-    local resp = net.get(url)
-    
-    if not resp.ok then
-        page_content = "Error: " .. (resp.err or "Unknown error") .. "\nCode: " .. (resp.code or "???")
-        max_scroll = 0
-        scroll_y = 0
+local function load_page(url)
+    if not net.status() == 3 then -- 3 = подключен
+        page_content = "WiFi disconnected!"
         return
     end
     
-    page_content = resp.body or ""
+    ui.text(20, 20, "Loading: " .. url:sub(1,30), 20, 0xFFFF00)
+    ui.flush()
     
-    -- Очень простой подсчёт строк для скролла
-    local line_count = 0
-    for _ in page_content:gmatch("\n") do line_count = line_count + 1 end
-    max_scroll = math.max(0, line_count * 28 - (SCR_H - 140))
-    
-    scroll_y = 0
+    local resp = net.get(url)
+    if resp.ok and resp.body then
+        page_content = resp.body
+    else
+        page_content = "Error " .. (resp.code or 0) .. ": " .. (resp.err or "no response")
+    end
 end
 
--- ======================================
---  Отрисовка T9 клавиатуры
--- ======================================
-local function draw_t9_keyboard()
-    local kx, ky = 10, SCR_H - 340
-    local key_w, key_h = 75, 75
-    local spacing = 10
+local function draw_url_bar()
+    ui.rect(5, 5, SCR_W-10, 45, COLOR_INPUT)
+    ui.rect(10, 10, SCR_W-20, 35, COLOR_BG)
     
-    for row = 1, #t9_layout do
-        for col = 1, #t9_layout[row] do
-            local key = t9_layout[row][col]
-            local x = kx + (col-1)*(key_w + spacing)
-            local y = ky + (row-1)*(key_h + spacing)
+    local disp_text = input_text:sub(1,35)
+    if #input_text > 35 then disp_text = disp_text .. "..." end
+    
+    if input_focused and (hw.millis() % 1000 < 500) then
+        disp_text = disp_text .. "|"
+    end
+    
+    ui.text(20, 22, disp_text, 20, input_focused and COLOR_INPUT_T or COLOR_TEXT)
+end
+
+local function draw_t9_keyboard()
+    local ky = SCR_H - 220
+    local key_w, key_h = 72, 50
+    local spacing = 8
+    
+    for row=1, #t9_layout do
+        local row_len = #t9_layout[row]
+        local start_x = (SCR_W - row_len*(key_w + spacing) + spacing)/2
+        
+        for col=1, row_len do
+            local x = start_x + (col-1)*(key_w + spacing)
+            local y = ky + (row-1)*(key_h + 8)
             
+            local key = t9_layout[row][col]
             local color = COLOR_BTN
-            if t9_current_key == row*10 + col then
+            local text = key
+            
+            -- Подсветка текущей клавиши
+            local key_id = row*10 + col
+            if t9_current_key == key_id then
                 color = COLOR_BTN_ACT
+                if row >= 3 and #key == 1 and key:match("[%w]") then
+                    text = key:upper()  -- показываем текущий символ
+                end
             end
             
             ui.rect(x, y, key_w, key_h, color)
             ui.rect(x+2, y+2, key_w-4, key_h-4, COLOR_BG)
-            
-            -- Отображаем текущий символ при наборе
-            local display_text = key
-            if row >= 2 and row <= 9 and t9_current_key == row*10 + col and t9_char_index > 1 then
-                display_text = t9_layout[row][t9_char_index]
-            end
-            
-            ui.text(x + key_w/2 - #display_text*7, y + key_h/2 - 12, display_text, 28, COLOR_TEXT)
+            ui.text(x + key_w/2 - #text*6, y + key_h/2 - 10, text, 22, COLOR_TEXT)
         end
     end
 end
 
--- ======================================
---  Отрисовка поля ввода URL
--- ======================================
-local function draw_url_bar()
-    ui.rect(10, 10, SCR_W-20, 70, COLOR_INPUT)
-    ui.rect(15, 15, SCR_W-30, 60, COLOR_BG)
+local function draw_buttons()
+    local btn_y = SCR_H - 60
+    local btn_w, btn_h = 90, 50
     
-    local display_text = input_text
-    if input_focused then
-        display_text = display_text .. (hw.millis() % 1000 < 500 and "|" or "")
+    local btns = {
+        {text="Back", x=10},
+        {text="Home", x=110},
+        {text="Go", x=220},
+        {text="↑↓", x=320}  -- скролл
+    }
+    
+    for i, btn in ipairs(btns) do
+        local color = COLOR_BTN
+        ui.rect(btn.x, btn_y, btn_w, btn_h, color)
+        ui.rect(btn.x+3, btn_y+3, btn_w-6, btn_h-6, COLOR_BG)
+        ui.text(btn.x + btn_w/2 - #btn.text*8, btn_y + btn_h/2 - 12, btn.text, 20, COLOR_TEXT)
     end
-    
-    ui.text(30, 35, display_text, 28, input_focused and COLOR_INPUT_T or COLOR_TEXT)
-    
-    -- Кнопка "Очистить"
-    ui.rect(SCR_W-110, 20, 90, 50, COLOR_BTN)
-    ui.text(SCR_W-90, 35, "X", 36, COLOR_TEXT)
 end
 
--- ======================================
---  Упрощённый рендеринг страницы
--- ======================================
-local function render_page()
-    ui.rect(0, 100, SCR_W, SCR_H-180, COLOR_BG)
+local function render_content()
+    ui.rect(0, 60, SCR_W, SCR_H-280, COLOR_BG)
     
-    local y = 110 - scroll_y
-    local line_height = 28
+    local y = 70 - scroll_y
+    local line_h = 24
     
-    for line in page_content:gmatch("[^\r\n]+") do
-        if y > 100 and y < SCR_H-100 then
-            -- Очень простой HTML-парсер (только текст и <img>)
-            if line:match("<img[^>]+src=\"([^\"]+)\"") then
-                local img_src = line:match("<img[^>]+src=\"([^\"]+)\"")
-                local img_path = "/sd/" .. img_src:match("[^/]+$")  -- только имя файла
-                
-                -- Пытаемся скачать изображение, если его нет
+    -- Простой рендер (строки + img)
+    for line in page_content:gmatch("[^\n\r]+") do
+        if y > 60 and y < SCR_H-280 then
+            -- <img src="...">
+            local img_src = line:match('src=["\']([^"\']+)["\']')
+            if img_src then
+                local img_path = "/img_" .. (hw.millis() % 10000) .. ".jpg"  -- уникальное имя
                 if not sd.exists(img_path) then
-                    local full_img_url = img_src
-                    if not full_img_url:match("^https?://") then
-                        -- относительный путь
-                        local base = current_url:match("^(https?://[^/]+)")
-                        if base then
-                            full_img_url = base .. (img_src:sub(1,1)=="/" and "" or "/") .. img_src
-                        end
-                    end
-                    
-                    ui.text(20, y, "Downloading image...", 20, 0xFFFF88)
-                    net.download(full_img_url, img_path, "sd")
+                    net.download(img_src, img_path, "sd")
                 end
-                
                 if sd.exists(img_path) then
-                    ui.drawJPEG_SD(20, y, img_path)
-                    -- Предполагаем, что JPEG ~240px высотой
-                    y = y + 260
+                    local ok = ui.drawJPEG_SD(20, y, img_path)
+                    y = y + (ok and 200 or line_h)
                 else
-                    ui.text(20, y, "[Image not loaded: " .. img_path .. "]", 20, 0xFF8888)
-                    y = y + line_height
+                    ui.text(20, y, "[IMG: " .. img_src:sub(-20) .. "]", 18, 0xFF4400)
+                    y = y + line_h
                 end
             else
-                -- Обычный текст
-                local text = line:gsub("<[^>]+>","") -- убираем теги
-                text = text:gsub("&[^;]+;"," ")      -- очень грубо
-                
-                if text:match("^%s*$") then goto continue end
-                
-                ui.text(20, y, text, 24, COLOR_TEXT)
-                y = y + line_height
+                -- текст (убираем теги)
+                local text = line:gsub("<[^>]*>", ""):gsub("&nbsp;", " ")
+                text = text:gsub("%s+", " "):match("^%s*(.-)%s*$")
+                if #text > 0 then
+                    ui.text(15, y, text, 20, COLOR_TEXT)
+                    y = y + line_h
+                end
             end
         end
-        
-        ::continue::
     end
 end
 
--- ======================================
---  T9 логика
--- ======================================
-local function handle_t9(key_row, key_col)
-    local key = t9_layout[key_row][key_col]
+local function handle_t9_touch(tx, ty)
+    local ky = SCR_H - 220
+    local key_w, key_h = 72, 50
+    local spacing = 8
     
-    if key == "←" then
-        -- backspace
-        input_text = input_text:sub(1, #input_text-1)
-        t9_current_key = nil
-    elseif key == "OK" then
-        -- enter
-        current_url = input_text
-        push_history(current_url)
-        load_page(current_url)
-        input_focused = false
-        t9_current_key = nil
-    elseif key_row >= 2 and key_row <= 9 then
-        -- буквы
-        if t9_current_key == key_row*10 + key_col then
-            -- тот же ключ — следующий символ
-            t9_char_index = t9_char_index + 1
-            if t9_char_index > #t9_layout[key_row] then
-                t9_char_index = 1
+    for row=1, #t9_layout do
+        local row_len = #t9_layout[row]
+        local start_x = (SCR_W - row_len*(key_w + spacing) + spacing)/2
+        
+        for col=1, row_len do
+            local x = start_x + (col-1)*(key_w + spacing)
+            local y = ky + (row-1)*(key_h + 8)
+            
+            if tx >= x and tx <= x+key_w and ty >= y and ty <= y+key_h then
+                local key = t9_layout[row][col]
+                local key_id = row*10 + col
+                
+                if key == "←" then
+                    input_text = input_text:sub(1, -2)
+                elseif key == "OK" or key == "Go" then
+                    if #input_text > 0 then
+                        current_url = input_text
+                        history[#history+1] = current_url
+                        history_idx = #history
+                        load_page(current_url)
+                    end
+                    input_focused = false
+                elseif key == "Back" then
+                    if history_idx > 1 then
+                        history_idx = history_idx - 1
+                        current_url = history[history_idx]
+                        load_page(current_url)
+                    end
+                    input_focused = false
+                elseif key == "Home" then
+                    current_url = "http://example.com"
+                    load_page(current_url)
+                    input_focused = false
+                elseif key == "http://" or key == ".com" then
+                    input_text = input_text .. key
+                elseif #key == 1 and key:match("[%w%.%?!/]") then
+                    input_text = input_text .. key
+                else
+                    -- T9 буквы (2-4 символа на клавишу)
+                    if t9_current_key == key_id then
+                        t9_char_index = t9_char_index % #key + 1
+                    else
+                        t9_char_index = 1
+                        t9_current_key = key_id
+                    end
+                    input_text = input_text:sub(1,-2) .. key:sub(t9_char_index, t9_char_index)
+                    t9_timer = hw.millis()
+                end
+                return true
             end
-        else
-            -- новый ключ
-            t9_char_index = 1
-            t9_current_key = key_row*10 + key_col
         end
-        
-        -- добавляем/заменяем последний символ
-        if #input_text > 0 and t9_char_index > 1 then
-            input_text = input_text:sub(1, #input_text-1)
-        end
-        input_text = input_text .. t9_layout[key_row][t9_char_index]
-        
-        t9_timer = hw.millis()
-    elseif key_row == 10 then
-        -- 0 - пробел
-        input_text = input_text .. " "
-        t9_current_key = nil
-    else
-        -- цифры, символы
-        input_text = input_text .. key
-        t9_current_key = nil
     end
+    return false
 end
 
--- ======================================
---  Основные функции
--- ======================================
 function setup()
-    hw.setBright(180)
-    ui.flush()
-    
-    -- Начальная страница
-    push_history(current_url)
+    hw.setBright(200)
     load_page(current_url)
 end
 
 function draw()
-    -- Фон
     ui.rect(0, 0, SCR_W, SCR_H, COLOR_BG)
     
-    -- URL бар
     draw_url_bar()
+    draw_buttons()
     
-    -- Кнопки
-    for _, btn in ipairs(buttons) do
-        ui.rect(btn.x, btn.y, btn.w, btn.h, COLOR_BTN)
-        ui.rect(btn.x+4, btn.y+4, btn.w-8, btn.h-8, COLOR_BG)
-        ui.text(btn.x + btn.w/2 - #btn.text*10, btn.y + btn.h/2 - 14, btn.text, 28, COLOR_TEXT)
-    end
-    
-    -- T9 клавиатура (показываем когда поле ввода в фокусе)
     if input_focused then
         draw_t9_keyboard()
     end
     
-    -- Контент страницы
-    render_page()
+    render_content()
     
-    -- Заголовок текущей страницы
-    ui.rect(0, 80, SCR_W, 40, 0x111133)
-    ui.text(20, 90, current_url:sub(1,40) .. (#current_url>40 and "..." or ""), 24, 0xAAAAAA)
+    -- Статус
+    local batt = hw.getBatt()
+    ui.text(SCR_W-80, 10, batt .. "%", 18, 0x00FF00)
     
     ui.flush()
 end
@@ -306,76 +244,47 @@ function loop()
     local touch = ui.getTouch()
     
     if touch.released then
-        -- =====================================
-        --  Клик по полю ввода
-        -- =====================================
-        if touch.x >= 15 and touch.x <= SCR_W-35 and
-           touch.y >= 15 and touch.y <= 75 then
+        -- URL bar
+        if touch.x > 10 and touch.x < SCR_W-10 and touch.y < 55 then
             input_focused = true
+            input_text = current_url
         end
         
-        -- Клик по кнопке "X" (очистить)
-        if input_focused and touch.x >= SCR_W-110 and touch.x <= SCR_W-20 and
-           touch.y >= 20 and touch.y <= 70 then
-            input_text = ""
-        end
-        
-        -- Клик по T9 клавишам
-        if input_focused then
-            local kx, ky = 10, SCR_H - 340
-            local key_w, key_h = 75, 75
-            local spacing = 10
-            
-            for row = 1, #t9_layout do
-                for col = 1, #t9_layout[row] do
-                    local x = kx + (col-1)*(key_w + spacing)
-                    local y = ky + (row-1)*(key_h + spacing)
-                    
-                    if touch.x >= x and touch.x <= x+key_w and
-                       touch.y >= y and touch.y <= y+key_h then
-                        handle_t9(row, col)
-                        break
-                    end
+        -- Кнопки
+        local btn_y = SCR_H - 60
+        if touch.y > btn_y and touch.y < btn_y+50 then
+            local btn_x = {10, 110, 220, 320}
+            local btn_id = math.floor((touch.x - 10)/100) + 1
+            if btn_id == 1 then  -- Back
+                if history_idx > 1 then history_idx = history_idx - 1; load_page(history[history_idx]) end
+            elseif btn_id == 2 then  -- Home
+                load_page("http://example.com")
+            elseif btn_id == 3 then  -- Go
+                if input_focused and #input_text > 0 then
+                    current_url = input_text; load_page(current_url)
                 end
             end
         end
         
-        -- Кнопки навигации
-        for _, btn in ipairs(buttons) do
-            if touch.x >= btn.x and touch.x <= btn.x + btn.w and
-               touch.y >= btn.y and touch.y <= btn.y + btn.h then
-                
-                if btn.action == "go" then
-                    current_url = input_text
-                    push_history(current_url)
-                    load_page(current_url)
-                    input_focused = false
-                elseif btn.action == "back" then
-                    go_back()
-                elseif btn.action == "home" then
-                    go_home()
-                elseif btn.action == "refresh" then
-                    load_page(current_url)
-                end
-            end
+        -- T9
+        if input_focused and touch.y > SCR_H-220 then
+            handle_t9_touch(touch.x, touch.y)
         end
     end
     
-    -- Обработка таймаута T9
+    -- Скролл (drag)
+    if touch.touching and not input_focused and touch.y > 60 and touch.y < SCR_H-280 then
+        if touch.pressed then
+            last_touch_y = touch.y
+        else
+            local dy = touch.y - last_touch_y
+            scroll_y = math.max(0, scroll_y + dy)
+            last_touch_y = touch.y
+        end
+    end
+    
+    -- T9 timeout
     if t9_current_key and hw.millis() - t9_timer > T9_TIMEOUT then
         t9_current_key = nil
-        t9_char_index = 1
-    end
-    
-    -- Простой скролл (смахивание вверх/вниз)
-    if touch.touching and touch.y < SCR_H-100 and touch.y > 100 then
-        if touch.pressed then
-            last_y = touch.y
-        else
-            local dy = touch.y - (last_y or touch.y)
-            scroll_y = scroll_y - dy * 1.5
-            scroll_y = math.max(0, math.min(max_scroll, scroll_y))
-            last_y = touch.y
-        end
     end
 end
