@@ -92,36 +92,13 @@ local function add_content(text, is_link, link_url)
     end
 end
 
--- Улучшенный HTML-парсер, который игнорирует всё кроме текста и ссылок
+-- Улучшенный HTML-парсер с сохранением ссылок
 function parse_html(html)
     content = {}
     content_height = 60
     
-    -- Очищаем HTML от всего лишнего
-    local function clean_html(raw_html)
-        -- 1. Удаляем комментарии
-        raw_html = raw_html:gsub("<!%-%-.-%-%->", "")
-        
-        -- 2. Удаляем теги скриптов и стилей
-        raw_html = raw_html:gsub("<script[^>]*>.-</script>", "")
-        raw_html = raw_html:gsub("<style[^>]*>.-</style>", "")
-        
-        -- 3. Удаляем все теги, кроме <a>, <p>, <div>, <br>, <h1>-<h6>
-        -- Заменяем другие теги пробелами или переносами строк
-        raw_html = raw_html:gsub("<br[^>]*>", "\n")
-        raw_html = raw_html:gsub("</p>", "\n")
-        raw_html = raw_html:gsub("</div>", "\n")
-        raw_html = raw_html:gsub("</h[1-6]>", "\n")
-        raw_html = raw_html:gsub("</li>", "\n")
-        raw_html = raw_html:gsub("</tr>", "\n")
-        raw_html = raw_html:gsub("<[^>]+>", " ")  -- все остальные теги заменяем пробелом
-        
-        return raw_html
-    end
-    
     -- Декодирование HTML-сущностей
     local function decode_entities(text)
-        -- Сначала спецсимволы
         text = text:gsub("&nbsp;", " ")
                    :gsub("&amp;", "&")
                    :gsub("&lt;", "<")
@@ -131,6 +108,7 @@ function parse_html(html)
                    :gsub("&apos;", "'")
                    :gsub("&ndash;", "-")
                    :gsub("&mdash;", "-")
+                   :gsub("&hellip;", "...")
         
         -- Числовые сущности
         text = text:gsub("&#(%d+);", function(n)
@@ -143,103 +121,182 @@ function parse_html(html)
         return text
     end
     
-    -- Извлекаем только содержимое <body>
-    local body_content = html
+    -- Очистка текста от лишних пробелов и переносов
+    local function clean_text(text)
+        if not text then return "" end
+        text = decode_entities(text)
+        text = text:gsub("[\r\n]+", " ")
+        text = text:gsub("%s%s+", " ")
+        return text:gsub("^%s+", ""):gsub("%s+$", "")
+    end
     
-    local body_start, body_end = html:find("<body[^>]*>")
+    -- Извлекаем тело документа
+    local body_content = html
+    local body_start = html:find("<body")
     if body_start then
-        local body_close = html:find("</body>", body_end)
-        if body_close then
-            body_content = html:sub(body_end + 1, body_close - 1)
+        local body_end = html:find("</body>", body_start)
+        if body_end then
+            body_content = html:sub(body_start, body_end - 1)
         else
-            body_content = html:sub(body_end + 1)
+            body_content = html:sub(body_start)
         end
     end
     
-    -- Очищаем HTML
-    body_content = clean_html(body_content)
+    -- Удаляем скрипты и стили
+    body_content = body_content:gsub("<script[^>]*>.-</script>", "")
+    body_content = body_content:gsub("<style[^>]*>.-</style>", "")
+    body_content = body_content:gsub("<!%-%-.-%-%->", "")
     
-    -- Разбираем ссылки и текст
+    -- Проходим по всему HTML и извлекаем текст и ссылки
     local pos = 1
-    local in_text_block = false
+    local text_buffer = ""
     
     while pos <= #body_content do
-        -- Ищем начало ссылки [ (мы заменили теги на [ и ])
-        local link_start = body_content:find("%[", pos)
+        -- Ищем следующий тег
+        local tag_start, tag_end, tag_full = body_content:find("<([^>]+)>", pos)
         
-        if link_start then
-            -- Текст перед ссылкой
-            local text_before = body_content:sub(pos, link_start - 1)
-            text_before = decode_entities(text_before)
-            text_before = text_before:gsub("^%s+", ""):gsub("%s+$", "")
-            
-            -- Добавляем только если есть значимый текст
-            local meaningful_text = text_before:gsub("%s%s+", " ")
-            if #meaningful_text > 2 and not meaningful_text:match("^[%s%p]+$") then
-                add_content(meaningful_text, false)
+        if not tag_start then
+            -- Текст после всех тегов
+            text_buffer = text_buffer .. body_content:sub(pos)
+            pos = #body_content + 1
+        else
+            -- Текст перед тегом
+            local text_before = body_content:sub(pos, tag_start - 1)
+            if #text_before > 0 then
+                text_buffer = text_buffer .. text_before
             end
             
-            -- Ищем конец ссылки ]
-            local link_end = body_content:find("%]", link_start + 1)
-            if link_end then
-                -- Внутри [] должно быть описание ссылки и URL через |
-                local link_info = body_content:sub(link_start + 1, link_end - 1)
-                local link_text, link_url = link_info:match("(.+)|(.+)")
-                
-                if link_text and link_url then
-                    link_text = decode_entities(link_text)
-                    link_url = decode_entities(link_url)
-                    
-                    link_text = link_text:gsub("^%s+", ""):gsub("%s+$", "")
-                    link_url = link_url:gsub("^%s+", ""):gsub("%s+$", "")
-                    
-                    if #link_text > 0 then
-                        -- Преобразуем относительные URL
-                        if link_url and not link_url:match("^https?://") then
-                            link_url = resolve_url(current_url, link_url)
+            -- Обрабатываем тег
+            local tag_name = tag_full:match("^(%w+)")
+            local tag_lower = tag_name and tag_name:lower() or ""
+            
+            -- Закрывающие теги, которые завершают блоки
+            if tag_full:match("^/") then
+                local closing_tag = tag_full:match("^/(%w+)")
+                if closing_tag then
+                    closing_tag = closing_tag:lower()
+                    if closing_tag == "p" or closing_tag == "div" or 
+                       closing_tag == "section" or closing_tag == "article" or
+                       closing_tag:match("^h[1-6]$") then
+                        -- Добавляем накопленный текст
+                        local cleaned = clean_text(text_buffer)
+                        if #cleaned > 2 then
+                            add_content(cleaned, false)
                         end
-                        
-                        add_content(link_text, true, link_url)
+                        text_buffer = ""
                     end
                 end
-                
-                pos = link_end + 1
-            else
-                -- Если нет закрывающей ], пропускаем
-                pos = link_start + 1
-            end
-        else
-            -- Весь остальной текст
-            local remaining = body_content:sub(pos)
-            remaining = decode_entities(remaining)
-            
-            -- Разбиваем на строки и добавляем
-            for line in remaining:gmatch("[^\n]+") do
-                line = line:gsub("^%s+", ""):gsub("%s+$", "")
-                line = line:gsub("%s%s+", " ")
-                
-                -- Фильтруем мусор
-                if #line > 3 and 
-                   not line:match("^[%s%p]+$") and  -- не только пробелы и пунктуация
-                   not line:match("^[%d%p]+$") and  -- не только цифры и пунктуация
-                   not line:match("^var%s") and
-                   not line:match("^function%s") and
-                   not line:match("^if%s*%(") and
-                   not line:match("^for%s*%(") and
-                   not line:match("^while%s*%(") and
-                   not line:match("^return%s") then
-                    
-                    add_content(line, false)
+            -- Открывающие теги
+            elseif tag_lower == "br" then
+                -- Перенос строки
+                local cleaned = clean_text(text_buffer)
+                if #cleaned > 2 then
+                    add_content(cleaned, false)
                 end
+                text_buffer = ""
+            elseif tag_lower == "a" then
+                -- Ссылка
+                -- Сначала добавляем текст до ссылки
+                local cleaned = clean_text(text_buffer)
+                if #cleaned > 2 then
+                    add_content(cleaned, false)
+                end
+                text_buffer = ""
+                
+                -- Извлекаем URL
+                local href = tag_full:match('href%s*=%s*["\']([^"\']+)["\']')
+                if href then
+                    href = resolve_url(current_url, href)
+                    
+                    -- Ищем текст ссылки до закрывающего </a>
+                    local link_end = body_content:find("</a>", tag_end + 1)
+                    if link_end then
+                        local link_text = body_content:sub(tag_end + 1, link_end - 1)
+                        link_text = clean_text(link_text)
+                        
+                        -- Удаляем вложенные теги из текста ссылки
+                        link_text = link_text:gsub("<[^>]+>", "")
+                        
+                        if #link_text > 0 then
+                            add_content(link_text, true, href)
+                        end
+                        
+                        pos = link_end + 4
+                    else
+                        pos = tag_end + 1
+                    end
+                else
+                    pos = tag_end + 1
+                end
+                -- Пропускаем обычную обработку тега
+                goto continue
+            elseif tag_lower == "p" or tag_lower == "div" or 
+                   tag_lower:match("^h[1-6]$") or tag_lower == "article" or 
+                   tag_lower == "section" then
+                -- Начало нового блока - добавляем предыдущий текст
+                local cleaned = clean_text(text_buffer)
+                if #cleaned > 2 then
+                    add_content(cleaned, false)
+                end
+                text_buffer = ""
             end
-            break
+            
+            pos = tag_end + 1
+        end
+        
+        ::continue::
+    end
+    
+    -- Добавляем оставшийся текст в конце
+    local cleaned = clean_text(text_buffer)
+    if #cleaned > 2 then
+        add_content(cleaned, false)
+    end
+    
+    -- Если ничего не нашлось, показываем заглушку
+    if #content == 0 then
+        -- Попробуем найти любые ссылки как запасной вариант
+        for href, link_text in body_content:gmatch('<a%s[^>]*href%s*=%s*["\']([^"\']+)["\'][^>]*>([^<]+)</a>') do
+            link_text = clean_text(link_text)
+            if #link_text > 2 then
+                href = resolve_url(current_url, href)
+                add_content(link_text, true, href)
+            end
+        end
+        
+        if #content == 0 then
+            add_content("Не удалось извлечь содержимое страницы", false)
+            add_content("Возможно, HTML слишком сложный", false)
+        end
+    end
+end
+
+-- Функция фильтрации контента (оставляем как есть, но убираем излишние фильтры)
+local function add_content(text, is_link, link_url)
+    if not is_link then
+        -- Легкая фильтрация только для явного мусора
+        -- Удаляем строки с множеством спецсимволов
+        local special_chars = text:gsub("[%w%s]", ""):len()
+        if special_chars > #text * 0.7 then  -- если больше 70% спецсимволов
+            return
+        end
+        
+        -- Удаляем строки которые точно являются кодом
+        if text:match("^[{}();]+$") or
+           text:match("^var%s+[%w_]+%s*=") or
+           text:match("^function%s*%(") then
+            return
         end
     end
     
-    -- Если ничего не нашли, показываем сообщение
-    if #content == 0 then
-        add_content("Контент страницы не найден или не поддерживается", false)
-        add_content("Попробуйте другую страницу", false)
+    local lines = wrap_text(text)
+    for _, line in ipairs(lines) do
+        table.insert(content, {
+            type = is_link and "link" or "text",
+            text = line,
+            url = link_url
+        })
+        content_height = content_height + (is_link and LINK_H or LINE_H)
     end
 end
 
