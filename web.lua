@@ -7,7 +7,7 @@ local FONT_H = 16  -- Approximate height for size 2 text
 local LINE_H = 18  -- Line spacing
 
 -- State
-local url = "https://jigsaw.w3.org/HTTP/Link.html"  -- Default test page with links and images
+local url = "https://www.google.com"  -- Default test page with links and images
 local raw_html = ""
 local display_lines = {}
 local links = {}          -- {url="...", title="..."}
