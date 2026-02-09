@@ -1,47 +1,35 @@
--- Простой веб-браузер на Lua БЕЗ поддержки изображений
--- Ссылки встроены в текст страницы
+-- Веб-браузер на Lua с встроенными в текст ссылками
+-- Без поддержки изображений
 
 local SCR_W, SCR_H = 410, 502
 local LINE_H = 28
-local MAX_CHARS_PER_LINE = 45  -- Увеличим для более естественного переноса
+local MAX_CHARS_PER_LINE = 30  -- Увеличим немного для лучшего отображения текста
 
 local current_url = "https://www.furtails.pw"
 local history, history_pos = {}, 0
 local scroll_y = 0
-local content = {}  -- Каждый элемент: {text, is_link, url, x, y, w, h}
-local content_height = 0
+local content, content_height = {}, 0
 
 -- ==========================================
--- ПРОСТОЙ ПАРСЕР HTML
+-- ПАРСИНГ HTML
 -- ==========================================
 
--- Декодирование HTML-сущностей
-local function decode_html_entities(str)
-    if not str then return "" end
-    str = str:gsub("&lt;", "<")
-    str = str:gsub("&gt;", ">")
-    str = str:gsub("&amp;", "&")
-    str = str:gsub("&quot;", '"')
-    str = str:gsub("&#(%d+);", function(code)
-        return string.char(tonumber(code))
-    end)
-    str = str:gsub("&nbsp;", " ")
-    return str
-end
+local BLOCK_TAGS = {
+    p=true, div=true, h1=true, h2=true, h3=true, h4=true, h5=true, h6=true,
+    ul=true, ol=true, li=true, br=true, blockquote=true, hr=true, tr=true
+}
 
 -- Разрешение относительных ссылок
 local function resolve_url(base, href)
-    if not href then return nil end
+    if not href then return base end
     href = href:gsub("^%s+", ""):gsub("%s+$", "")
     
     if href:sub(1,2) == "//" then return "https:" .. href end
     if href:match("^https?://") then return href end
-    if href:match("^mailto:") or href:match("^javascript:") or href:match("^#") then 
-        return nil 
-    end
+    if href:match("^mailto:") or href:match("^javascript:") then return nil end
     
     local proto, domain = base:match("^(https?://)([^/]+)")
-    if not proto then return nil end
+    if not proto then return href end
     
     if href:sub(1,1) == "/" then
         return proto .. domain .. href
@@ -51,147 +39,196 @@ local function resolve_url(base, href)
     return proto .. domain .. path .. href
 end
 
--- Основной парсинг
+-- Декодирование HTML-сущностей (упрощенное)
+local function decode_html_entities(str)
+    if not str then return "" end
+    str = str:gsub("&lt;", "<")
+    str = str:gsub("&gt;", ">")
+    str = str:gsub("&amp;", "&")
+    str = str:gsub("&quot;", '"')
+    str = str:gsub("&#(%d+);", function(code)
+        return string.char(tonumber(code))
+    end)
+    str = str:gsub("&#x(%x+);", function(code)
+        return string.char(tonumber(code, 16))
+    end)
+    return str
+end
+
+-- Очистка текста
+local function clean_text(txt)
+    txt = txt:gsub("[%s\r\n]+", " ")
+    txt = txt:gsub("^%s+", ""):gsub("%s+$", "")
+    return txt
+end
+
+-- Удаление скриптов, стилей и изображений
+local function remove_junk(html)
+    -- Удаляем комментарии
+    html = html:gsub("<!%-%-.-%-%->", "")
+    
+    -- Удаляем <script>...</script>
+    html = html:gsub("<script[^>]*>.-</script>", "")
+    html = html:gsub("<SCRIPT[^>]*>.-</SCRIPT>", "")
+    
+    -- Удаляем <style>...</style>
+    html = html:gsub("<style[^>]*>.-</style>", "")
+    html = html:gsub("<STYLE[^>]*>.-</STYLE>", "")
+    
+    -- Удаляем изображения полностью
+    html = html:gsub("<img[^>]*>", "")
+    html = html:gsub("<IMG[^>]*>", "")
+    
+    -- Удаляем другие ненужные теги
+    html = html:gsub("<noscript[^>]*>.-</noscript>", "")
+    html = html:gsub("<iframe[^>]*>.-</iframe>", "")
+    html = html:gsub("<svg[^>]*>.-</svg>", "")
+    
+    return html
+end
+
+-- Обертка текста
+local function wrap_text(text)
+    if #text <= MAX_CHARS_PER_LINE then
+        return {text}
+    end
+    
+    local lines = {}
+    local current = ""
+    local words = {}
+    
+    -- Разбиваем на слова
+    for word in text:gmatch("%S+") do
+        table.insert(words, word)
+    end
+    
+    for i, word in ipairs(words) do
+        if #current + #word + 1 <= MAX_CHARS_PER_LINE or #current == 0 then
+            if #current > 0 then
+                current = current .. " " .. word
+            else
+                current = word
+            end
+        else
+            table.insert(lines, current)
+            current = word
+        end
+    end
+    
+    if #current > 0 then
+        table.insert(lines, current)
+    end
+    
+    return lines
+end
+
+-- Добавление контента
+local function add_content(text, is_link, link_url)
+    if not text or text == "" then return end
+    
+    local lines = wrap_text(text)
+    for _, line in ipairs(lines) do
+        table.insert(content, {
+            type = is_link and "link" or "text",
+            text = line,
+            url = link_url
+        })
+        content_height = content_height + LINE_H
+    end
+end
+
+-- Парсинг HTML
 local function parse_html(html)
     content = {}
-    content_height = 100
+    content_height = 60
     
-    -- Удаляем ненужное
-    html = html:gsub("<!%-%-.-%-%->", "")  -- комментарии
-    html = html:gsub("<script[^>]*>.-</script>", "")  -- скрипты
-    html = html:gsub("<style[^>]*>.-</style>", "")   -- стили
-    html = html:gsub("<img[^>]*>", "")  -- изображения
-    
-    -- Преобразуем теги
-    html = html:gsub("<br%s*/?>", "\n")
-    html = html:gsub("<p>", "\n")
-    html = html:gsub("</p>", "\n\n")
-    html = html:gsub("<h%d>", "\n\n")
-    html = html:gsub("</h%d>", "\n\n")
-    html = html:gsub("<div>", "\n")
-    html = html:gsub("</div>", "\n")
-    
-    -- Удаляем все остальные теги, но сохраняем ссылки
-    local result = {}
+    html = remove_junk(html)
+
     local pos = 1
     local in_link = false
     local current_link = nil
+    local link_text = ""
     
     while pos <= #html do
-        -- Ищем тег
-        local tag_start = html:find("<", pos)
+        local start_tag = html:find("<", pos)
         
-        if not tag_start then
-            -- Текст до конца
+        if not start_tag then
+            -- Остаток текста до конца документа
             local text = html:sub(pos)
-            text = decode_html_entities(text)
+            text = clean_text(decode_html_entities(text))
             if text ~= "" then
-                table.insert(result, {
-                    text = text,
-                    is_link = in_link,
-                    url = current_link
-                })
+                if in_link then
+                    link_text = link_text .. text
+                else
+                    add_content(text, false, nil)
+                end
             end
             break
         end
         
-        if tag_start > pos then
-            -- Текст до тега
-            local text = html:sub(pos, tag_start - 1)
-            text = decode_html_entities(text)
+        if start_tag > pos then
+            -- Текст перед тегом
+            local text = html:sub(pos, start_tag - 1)
+            text = clean_text(decode_html_entities(text))
             if text ~= "" then
-                table.insert(result, {
-                    text = text,
-                    is_link = in_link,
-                    url = current_link
-                })
-            end
-        end
-        
-        -- Обрабатываем тег
-        local tag_end = html:find(">", tag_start)
-        if not tag_end then break end
-        
-        local tag = html:sub(tag_start + 1, tag_end - 1)
-        local tag_name = tag:match("^/?([%w]+)")
-        
-        if tag_name then
-            tag_name = tag_name:lower()
-            
-            if tag_name == "a" then
-                if tag:sub(1,1) == "/" then
-                    -- Закрывающий тег </a>
-                    in_link = false
-                    current_link = nil
+                if in_link then
+                    link_text = link_text .. text
                 else
-                    -- Открывающий тег <a>
-                    local href = tag:match('href%s*=%s*"([^"]+)"') or 
-                                 tag:match("href%s*=%s*'([^']+)'")
-                    current_link = resolve_url(current_url, href)
-                    if current_link then
-                        in_link = true
-                    end
+                    add_content(text, false, nil)
                 end
             end
         end
         
-        pos = tag_end + 1
-    end
-    
-    -- Теперь формируем контент для отображения
-    prepare_content(result)
-end
-
--- Подготовка контента для отображения
-local function prepare_content(parts)
-    content = {}
-    local x = 20
-    local y = 10
-    local current_line = ""
-    local current_line_is_link = false
-    local current_line_url = nil
-    local line_start_x = x
-    
-    -- Примерные размеры символов
-    local CHAR_W = 12 * 2  -- Для размера текста 2
-    
-    local function add_text_segment(text, is_link, url)
-        local segment_w = #text * CHAR_W
+        local end_tag = html:find(">", start_tag)
+        if not end_tag then break end
         
-        if x + segment_w > SCR_W - 20 then
-            -- Перенос строки
-            x = 20
-            y = y + LINE_H
+        local tag_raw = html:sub(start_tag + 1, end_tag - 1)
+        local is_closing, tag_name = tag_raw:match("^(/?)([%w%-]+)")
+        
+        if tag_name then
+            tag_name = tag_name:lower()
+            local is_block = BLOCK_TAGS[tag_name]
+            
+            if is_closing == "/" then
+                if tag_name == "a" then
+                    -- Закрывающий тег ссылки
+                    if link_text ~= "" and current_link then
+                        add_content("[" .. link_text .. "]", true, current_link)
+                    end
+                    in_link = false
+                    current_link = nil
+                    link_text = ""
+                elseif is_block then
+                    -- Добавляем отступ после блочного тега
+                    add_content("", false, nil)
+                end
+            else
+                if tag_name == "a" then
+                    -- Открывающий тег ссылки
+                    local href = tag_raw:match('href%s*=%s*"([^"]+)"') or 
+                                 tag_raw:match("href%s*=%s*'([^']+)'")
+                    if href then
+                        current_link = resolve_url(current_url, href)
+                        if current_link then 
+                            in_link = true
+                            link_text = ""
+                        end
+                    end
+                elseif tag_name == "br" then
+                    add_content("", false, nil)
+                elseif is_block then
+                    add_content("", false, nil)
+                end
+            end
         end
         
-        table.insert(content, {
-            text = text,
-            is_link = is_link,
-            url = url,
-            x = x,
-            y = y,
-            w = segment_w,
-            h = LINE_H
-        })
-        
-        x = x + segment_w
+        pos = end_tag + 1
     end
     
-    for _, part in ipairs(parts) do
-        local text = part.text
-        
-        -- Разбиваем текст на слова
-        for word in text:gmatch("[^%s]+") do
-            add_text_segment(word .. " ", part.is_link, part.url)
-        end
-        
-        -- Если был пробел в конце
-        if text:match("%s$") then
-            add_text_segment(" ", false, nil)
-        end
+    -- Если осталась незакрытая ссылка (плохой HTML)
+    if in_link and link_text ~= "" and current_link then
+        add_content("[" .. link_text .. "]", true, current_link)
     end
-    
-    content_height = y + LINE_H + 40
 end
 
 -- ==========================================
@@ -204,8 +241,6 @@ function load_page(new_url)
         new_url = "https://" .. new_url
     end
     
-    print("Loading: " .. new_url)
-    
     local res = net.get(new_url)
     if res.ok and res.code == 200 then
         current_url = new_url
@@ -213,24 +248,18 @@ function load_page(new_url)
         history_pos = #history
         parse_html(res.body)
         scroll_y = 0
-        print("Page loaded successfully")
+        draw()
+        ui.flush()
     else
-        print("Error loading page")
-        -- Простая ошибка
-        content = {{
-            text = "Error loading page: " .. tostring(res.err or "unknown"),
-            is_link = false,
-            url = nil,
-            x = 20,
-            y = 20,
-            w = 200,
-            h = LINE_H
-        }}
-        content_height = 100
+        content = {}
+        content_height = 200
+        add_content("Ошибка загрузки", false)
+        add_content("URL: " .. new_url, false)
+        add_content("Код: " .. tostring(res.code or "—"), false)
+        add_content("Ошибка: " .. tostring(res.err or "нет ответа"), false)
+        draw()
+        ui.flush()
     end
-    
-    draw()
-    ui.flush()
 end
 
 -- Назад
@@ -241,91 +270,71 @@ local function go_back()
     end
 end
 
--- Проверка клика
-local function handle_click(x, y)
-    for _, item in ipairs(content) do
-        if item.is_link and item.url then
-            if x >= item.x and x <= item.x + item.w and
-               y >= item.y and y <= item.y + item.h then
-                print("Clicked link: " .. item.url)
-                load_page(item.url)
-                return true
-            end
-        end
-    end
-    return false
-end
-
 -- ==========================================
 -- ОТРИСОВКА
 -- ==========================================
 
 function draw()
-    ui.rect(0, 0, SCR_W, SCR_H, 0x0000)  -- Черный фон
+    ui.rect(0, 0, SCR_W, SCR_H, 0)
 
-    -- Панель URL
-    ui.rect(0, 0, SCR_W, 40, 0x2104)
+    -- URL строка
     local display_url = current_url
-    if #display_url > 40 then
-        display_url = display_url:sub(1, 37) .. "..."
+    if #display_url > 50 then
+        display_url = display_url:sub(1, 47) .. "..."
     end
-    ui.text(10, 10, display_url, 2, 0xFFFF)
+    ui.text(10, 12, display_url, 2, 0xFFFF)
 
     -- Панель управления
-    ui.rect(0, 40, SCR_W, 50, 0x3186)
-    
     if history_pos > 1 then
-        if ui.button(10, 45, 80, 40, "Back", 0x4A69) then 
+        if ui.button(10, 52, 100, 40, "Back", 0x4208) then 
             go_back()
         end
     end
-    
-    if ui.button(100, 45, 100, 40, "Reload", 0x4A69) then 
+    if ui.button(120, 52, 130, 40, "Reload", 0x4208) then 
         load_page(current_url)
     end
-    
-    if ui.button(210, 45, 100, 40, "Home", 0x4A69) then 
+    if ui.button(260, 52, 130, 40, "Home", 0x4208) then 
         load_page("https://www.furtails.pw")
     end
-    
-    -- Кнопка тестовой загрузки
-    if ui.button(320, 45, 80, 40, "Test", 0x4A69) then 
-        load_page("https://textise dot iitty")
-    end
 
-    -- Область контента
-    scroll_y = ui.beginList(0, 90, SCR_W, SCR_H - 90, scroll_y, content_height)
-    
-    -- Обработка кликов
-    local touch = ui.getTouch()
-    if touch and touch.released then
-        handle_click(touch.x, touch.y + scroll_y - 90)  -- Учитываем скролл
-    end
-    
-    -- Отображение текста
-    for _, item in ipairs(content) do
-        local color = item.is_link and 0x07FF or 0xFFFF
-        ui.text(item.x, item.y, item.text, 2, color)
-        
-        -- Подчеркивание для ссылок
-        if item.is_link then
-            ui.rect(item.x, item.y + 22, item.w, 1, 0x07FF)
+    -- Контент
+    scroll_y = ui.beginList(0, 100, SCR_W, SCR_H - 100, scroll_y, content_height)
+
+    local cy = 20
+    for idx, item in ipairs(content) do
+        if item.type == "text" then
+            if item.text ~= "" then
+                ui.text(20, cy, item.text, 2, 0xFFFF)
+                cy = cy + LINE_H
+            else
+                cy = cy + LINE_H / 2
+            end
+        elseif item.type == "link" then
+            -- Встроенная ссылка - это просто цветной текст
+            local display_text = item.text
+            
+            -- Проверяем клик по ссылке
+            local text_width = #display_text * 8  -- Примерная ширина символа
+            
+            -- Создаем "невидимую" кнопку поверх текста ссылки
+            if ui.button(15, cy - 5, text_width + 10, LINE_H, "", 0x0000) then
+                load_page(item.url)
+            end
+            
+            -- Рисуем текст ссылки синим цветом
+            ui.text(20, cy, display_text, 2, 0x07FF)
+            
+            -- Подчеркивание для ссылок
+            ui.rect(20, cy + 18, text_width, 1, 0x07FF)
+            
+            cy = cy + LINE_H
         end
     end
-    
+
     ui.endList()
     
-    -- Статусная строка
-    ui.rect(0, SCR_H - 30, SCR_W, 30, 0x2104)
-    
-    -- Подсчет ссылок
-    local link_count = 0
-    for _, item in ipairs(content) do
-        if item.is_link then link_count = link_count + 1 end
-    end
-    
-    ui.text(10, SCR_H - 25, "Links: " .. link_count, 1, 0x7BEF)
-    ui.text(SCR_W - 100, SCR_H - 25, #content .. " items", 1, 0x7BEF)
+    -- Индикатор внизу
+    ui.text(10, SCR_H - 15, "Links are blue and clickable", 1, 0x8410)
 end
 
 -- ==========================================
@@ -334,6 +343,3 @@ end
 
 -- Загружаем стартовую страницу
 load_page(current_url)
-
--- Основной цикл
--- Функция draw() будет вызываться автоматически из прошивки
