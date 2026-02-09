@@ -5,7 +5,7 @@ local SCR_W, SCR_H = 410, 502
 local LINE_H = 28
 local MAX_CHARS_PER_LINE = 45  -- Увеличим для более естественного переноса
 
-local current_url = "https://en.wikipedia.org/wiki/Main_Page"
+local current_url = "https://www.furtails.pw"
 local history, history_pos = {}, 0
 local scroll_y = 0
 local content = {}  -- Каждый элемент: {text, is_link, url, x, y, w, h}
@@ -285,7 +285,7 @@ function draw()
     end
     
     if ui.button(210, 45, 100, 40, "Home", 0x4A69) then 
-        load_page("https://en.wikipedia.org/wiki/Main_Page")
+        load_page("https://www.furtails.pw")
     end
     
     -- Кнопка тестовой загрузки
