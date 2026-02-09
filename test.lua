@@ -21,7 +21,7 @@ function draw_main()
     end
     -- btn_menu
     if ui.button(240, 445, 115, 40, "menu", 22289) then
-        print("Button btn_menu clicked")
+        currentPage = "quickmenu"
     end
     -- statustext
     ui.text(95, 485, "Done (150ms)", 1, 65535)
@@ -55,6 +55,7 @@ function draw_quickmenu()
     -- exitbtn
     if ui.button(30, 405, 140, 45, "exit", 59783) then
         print("Button exitbtn clicked")
+        hw.reboot()
     end
     -- text_6
     ui.text(25, 245, "free psram:", 1, 65535)
