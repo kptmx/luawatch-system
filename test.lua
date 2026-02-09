@@ -26,8 +26,8 @@ function draw_main()
     -- statustext
     ui.text(95, 485, "Done (150ms)", 1, 65535)
     -- List: list_6
-    list_6_scroll = ui.BeginList(0, 35, 410, 370, list_6_scroll, 400)
-    ui.EndList()
+    list_6_scroll = ui.beginList(0, 35, 410, 370, list_6_scroll, 400)
+    ui.endList()
 
     -- batttext
     ui.text(240, 0, "100%", 2, 65535)
