@@ -4,20 +4,12 @@
 function draw()
     ui.rect(0, 0, 410, 502, 0) -- Clear background if needed
 
-    -- button_1
-    if ui.button(25, 25, 120, 40, "New Element", 10665) then
-        print("Button button_1 clicked")
-        hw.reboot()
-    end
-    -- text_2
-    ui.text(165, 175, "тест ОООППП", 2, 65535)
-    -- input_3
-    if ui.input(20, 75, 200, 40, "Input Text", false) then end
-    -- slider_4
-    if slider_4_val == nil then slider_4_val = 0.5 end
-    slider_4_val = ui.slider(20, 125, 200, 30, slider_4_val, 0, 15390)
-    -- rect_5
-    ui.rect(235, 75, 100, 100, 12678)
-    -- rect_6
-    ui.rect(240, 205, 100, 100, 12678)
+    -- rect_1
+    ui.rect(35, 35, 100, 100, 12678)
+    -- rect_2
+    ui.rect(35, 345, 100, 100, 12678)
+    -- rect_3
+    ui.rect(255, 345, 100, 100, 12678)
+    -- rect_4
+    ui.rect(255, 35, 100, 100, 12678)
 end
