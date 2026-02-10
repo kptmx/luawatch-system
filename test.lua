@@ -1,17 +1,40 @@
--- Веб-браузер на Lua с встроенными в текст ссылками
--- Без поддержки изображений
+-- WebPrimitive 0.1 - Текстовый браузер с T9 клавиатурой
+-- Основан на LuaWatch Designer интерфейсе
 
-local SCR_W, SCR_H = 410, 502
-local LINE_H = 28
-local MAX_CHARS_PER_LINE = 45  -- Увеличим немного для лучшего отображения текста
+currentPage = "main"
+current_url = "https://google.com"
+history = {}
+history_pos = 0
+web_content_scroll = 0
+web_content = {}
+web_content_height = 0
+MAX_CHARS_PER_LINE = 24
+LINE_H = 28
+LINK_H = 36
 
-local current_url = "https://www.furtails.pw"
-local history, history_pos = {}, 0
-local scroll_y = 0
-local content, content_height = {}, 0
+-- T9 клавиатура
+local t9_keys = {
+    ["1"] = ".,!1",
+    ["2"] = "abc2", 
+    ["3"] = "def3",
+    ["4"] = "ghi4",
+    ["5"] = "jkl5",
+    ["6"] = "mno6",
+    ["7"] = "pqrs7",
+    ["8"] = "tuv8", 
+    ["9"] = "wxyz9",
+    ["*"] = "*",
+    ["0"] = " 0",
+    ["#"] = "#"
+}
+
+local url_input_text = ""
+local last_t9_key = ""
+local last_t9_time = 0
+local t9_char_index = 1
 
 -- ==========================================
--- ПАРСИНГ HTML
+-- HTML парсинг (без изображений)
 -- ==========================================
 
 local BLOCK_TAGS = {
@@ -19,7 +42,6 @@ local BLOCK_TAGS = {
     ul=true, ol=true, li=true, br=true, blockquote=true, hr=true, tr=true
 }
 
--- Разрешение относительных ссылок
 local function resolve_url(base, href)
     if not href then return base end
     href = href:gsub("^%s+", ""):gsub("%s+$", "")
@@ -39,7 +61,6 @@ local function resolve_url(base, href)
     return proto .. domain .. path .. href
 end
 
--- Декодирование HTML-сущностей (упрощенное)
 local function decode_html_entities(str)
     if not str then return "" end
     str = str:gsub("&lt;", "<")
@@ -49,45 +70,24 @@ local function decode_html_entities(str)
     str = str:gsub("&#(%d+);", function(code)
         return string.char(tonumber(code))
     end)
-    str = str:gsub("&#x(%x+);", function(code)
-        return string.char(tonumber(code, 16))
-    end)
     return str
 end
 
--- Очистка текста
 local function clean_text(txt)
     txt = txt:gsub("[%s\r\n]+", " ")
     txt = txt:gsub("^%s+", ""):gsub("%s+$", "")
     return txt
 end
 
--- Удаление скриптов, стилей и изображений
 local function remove_junk(html)
-    -- Удаляем комментарии
     html = html:gsub("<!%-%-.-%-%->", "")
-    
-    -- Удаляем <script>...</script>
     html = html:gsub("<script[^>]*>.-</script>", "")
-    html = html:gsub("<SCRIPT[^>]*>.-</SCRIPT>", "")
-    
-    -- Удаляем <style>...</style>
     html = html:gsub("<style[^>]*>.-</style>", "")
-    html = html:gsub("<STYLE[^>]*>.-</STYLE>", "")
-    
-    -- Удаляем изображения полностью
-    html = html:gsub("<img[^>]*>", "")
-    html = html:gsub("<IMG[^>]*>", "")
-    
-    -- Удаляем другие ненужные теги
     html = html:gsub("<noscript[^>]*>.-</noscript>", "")
     html = html:gsub("<iframe[^>]*>.-</iframe>", "")
-    html = html:gsub("<svg[^>]*>.-</svg>", "")
-    
     return html
 end
 
--- Обертка текста
 local function wrap_text(text)
     if #text <= MAX_CHARS_PER_LINE then
         return {text}
@@ -97,7 +97,6 @@ local function wrap_text(text)
     local current = ""
     local words = {}
     
-    -- Разбиваем на слова
     for word in text:gmatch("%S+") do
         table.insert(words, word)
     end
@@ -122,60 +121,46 @@ local function wrap_text(text)
     return lines
 end
 
--- Добавление контента
 local function add_content(text, is_link, link_url)
     if not text or text == "" then return end
     
     local lines = wrap_text(text)
     for _, line in ipairs(lines) do
-        table.insert(content, {
+        table.insert(web_content, {
             type = is_link and "link" or "text",
             text = line,
             url = link_url
         })
-        content_height = content_height + LINE_H
+        web_content_height = web_content_height + (is_link and LINK_H or LINE_H)
     end
 end
 
--- Парсинг HTML
 local function parse_html(html)
-    content = {}
-    content_height = 60
-    
+    web_content = {}
+    web_content_height = 60
     html = remove_junk(html)
 
     local pos = 1
     local in_link = false
     local current_link = nil
-    local link_text = ""
     
     while pos <= #html do
         local start_tag = html:find("<", pos)
         
         if not start_tag then
-            -- Остаток текста до конца документа
             local text = html:sub(pos)
             text = clean_text(decode_html_entities(text))
             if text ~= "" then
-                if in_link then
-                    link_text = link_text .. text
-                else
-                    add_content(text, false, nil)
-                end
+                add_content(text, in_link, current_link)
             end
             break
         end
         
         if start_tag > pos then
-            -- Текст перед тегом
             local text = html:sub(pos, start_tag - 1)
             text = clean_text(decode_html_entities(text))
             if text ~= "" then
-                if in_link then
-                    link_text = link_text .. text
-                else
-                    add_content(text, false, nil)
-                end
+                add_content(text, in_link, current_link)
             end
         end
         
@@ -191,28 +176,18 @@ local function parse_html(html)
             
             if is_closing == "/" then
                 if tag_name == "a" then
-                    -- Закрывающий тег ссылки
-                    if link_text ~= "" and current_link then
-                        add_content("[" .. link_text .. "]", true, current_link)
-                    end
                     in_link = false
                     current_link = nil
-                    link_text = ""
                 elseif is_block then
-                    -- Добавляем отступ после блочного тега
                     add_content("", false, nil)
                 end
             else
                 if tag_name == "a" then
-                    -- Открывающий тег ссылки
                     local href = tag_raw:match('href%s*=%s*"([^"]+)"') or 
                                  tag_raw:match("href%s*=%s*'([^']+)'")
                     if href then
                         current_link = resolve_url(current_url, href)
-                        if current_link then 
-                            in_link = true
-                            link_text = ""
-                        end
+                        if current_link then in_link = true end
                     end
                 elseif tag_name == "br" then
                     add_content("", false, nil)
@@ -224,18 +199,12 @@ local function parse_html(html)
         
         pos = end_tag + 1
     end
-    
-    -- Если осталась незакрытая ссылка (плохой HTML)
-    if in_link and link_text ~= "" and current_link then
-        add_content("[" .. link_text .. "]", true, current_link)
-    end
 end
 
 -- ==========================================
--- ОСНОВНЫЕ ФУНКЦИИ
+-- Загрузка страниц
 -- ==========================================
 
--- Загрузка страницы
 function load_page(new_url)
     if not new_url:match("^https?://") then
         new_url = "https://" .. new_url
@@ -247,23 +216,18 @@ function load_page(new_url)
         table.insert(history, current_url)
         history_pos = #history
         parse_html(res.body)
-        scroll_y = 0
-        draw()
-        ui.flush()
+        web_content_scroll = 0
     else
-        content = {}
-        content_height = 200
+        web_content = {}
+        web_content_height = 100
         add_content("Ошибка загрузки", false)
         add_content("URL: " .. new_url, false)
         add_content("Код: " .. tostring(res.code or "—"), false)
         add_content("Ошибка: " .. tostring(res.err or "нет ответа"), false)
-        draw()
-        ui.flush()
     end
 end
 
--- Назад
-local function go_back()
+function go_back()
     if history_pos > 1 then
         history_pos = history_pos - 1
         load_page(history[history_pos])
@@ -271,37 +235,64 @@ local function go_back()
 end
 
 -- ==========================================
--- ОТРИСОВКА
+-- T9 логика
 -- ==========================================
 
-function draw()
-    ui.rect(0, 0, SCR_W, SCR_H, 0)
+function handle_t9_key(key)
+    local now = hw.millis()
+    local chars = t9_keys[key]
+    if not chars then return end
+    
+    -- Если нажата та же клавиша в течение 800мс — меняем символ
+    if key == last_t9_key and (now - last_t9_time) < 800 then
+        url_input_text = url_input_text:sub(1, -2)
+        t9_char_index = (t9_char_index % #chars) + 1
+    else
+        t9_char_index = 1
+    end
+    
+    url_input_text = url_input_text .. chars:sub(t9_char_index, t9_char_index)
+    last_t9_key = key
+    last_t9_time = now
+end
 
-    -- URL строка
+-- ==========================================
+-- Интерфейсные функции
+-- ==========================================
+
+function draw_main()
+    -- URL строка (кликабельная)
     local display_url = current_url
-    if #display_url > 50 then
-        display_url = display_url:sub(1, 47) .. "..."
+    if #display_url > 30 then
+        display_url = display_url:sub(1, 27) .. "..."
     end
-    ui.text(10, 12, display_url, 2, 0xFFFF)
-
+    
+    if ui.button(0, 410, 410, 30, display_url, 14823) then
+        url_input_text = current_url
+        currentPage = "urlenter"
+    end
+    
     -- Панель управления
-    if history_pos > 1 then
-        if ui.button(10, 52, 100, 40, "Back", 0x4208) then 
-            go_back()
-        end
+    if ui.button(60, 445, 90, 40, "back", 10665) then
+        go_back()
     end
-    if ui.button(120, 52, 130, 40, "Reload", 0x4208) then 
+    
+    if ui.button(155, 445, 80, 40, "reld", 10665) then
         load_page(current_url)
     end
-    if ui.button(260, 52, 130, 40, "Home", 0x4208) then 
-        load_page("https://www.furtails.pw")
+    
+    if ui.button(240, 445, 115, 40, "menu", 14792) then
+        currentPage = "quickmenu"
     end
-
-    -- Контент
-    scroll_y = ui.beginList(0, 100, SCR_W, SCR_H - 100, scroll_y, content_height)
-
+    
+    -- Статус
+    ui.text(110, 485, "Ready", 1, 65535)
+    
+    -- Содержимое страницы
+    web_content_scroll = ui.beginList(0, 35, 410, 370, web_content_scroll, web_content_height)
+    
     local cy = 20
-    for idx, item in ipairs(content) do
+    for idx, item in ipairs(web_content) do
         if item.type == "text" then
             if item.text ~= "" then
                 ui.text(20, cy, item.text, 2, 0xFFFF)
@@ -310,35 +301,144 @@ function draw()
                 cy = cy + LINE_H / 2
             end
         elseif item.type == "link" then
-            -- Встроенная ссылка - это просто цветной текст
-            local display_text = item.text
-            
-            -- Проверяем клик по ссылке
-            local text_width = #display_text * 8  -- Примерная ширина символа
-            
-            -- Создаем "невидимую" кнопку поверх текста ссылки
-            if ui.button(15, cy - 5, text_width + 10, LINE_H, "", 0x0000) then
+            local clicked = ui.button(10, cy, SCR_W - 20, LINK_H, "", 0x0101)
+            ui.text(25, cy + 6, item.text, 2, 0x07FF)
+            if clicked then
                 load_page(item.url)
             end
-            
-            -- Рисуем текст ссылки синим цветом
-            ui.text(20, cy, display_text, 2, 0x07FF)
-            
-            -- Подчеркивание для ссылок
-            ui.rect(30, cy + 28, text_width, 1, 0x07FF)
-            
-            cy = cy + LINE_H
+            cy = cy + LINK_H
         end
     end
-
+    
     ui.endList()
     
-    -- Индикатор внизу
-    ui.text(10, SCR_H - 15, "Links are blue and clickable", 1, 0x8410)
+    -- Батарея и время
+    ui.text(240, 0, hw.getBatt() .. "%", 2, 65535)
+    
+    local time = hw.getTime()
+    ui.text(90, 0, string.format("%02d:%02d", time.h, time.m), 2, 65535)
+end
+
+function draw_quickmenu()
+    -- Добавить в закладки
+    if ui.button(20, 100, 180, 60, "add to bm", 10665) then
+        -- Сохранить URL в файл закладок
+        local bookmarks = fs.load("/bookmarks.txt") or ""
+        if not bookmarks:find(current_url) then
+            fs.append("/bookmarks.txt", current_url .. "\n")
+        end
+        currentPage = "main"
+    end
+    
+    -- Показать закладки
+    if ui.button(210, 100, 180, 60, "bookmarks", 10665) then
+        -- Здесь можно реализовать просмотр закладок
+        currentPage = "main"
+    end
+    
+    -- История
+    if ui.button(20, 170, 180, 60, "history", 10665) then
+        -- Здесь можно реализовать просмотр истории
+        currentPage = "main"
+    end
+    
+    -- Очистить историю
+    if ui.button(210, 170, 180, 60, "clrhistory", 10665) then
+        history = {}
+        history_pos = 0
+        currentPage = "main"
+    end
+    
+    -- Выход
+    if ui.button(30, 405, 140, 45, "exit", 59783) then
+        currentPage = "main"
+    end
+    
+    -- Статус PSRAM
+    ui.text(25, 245, "free psram: " .. hw.getFreePsram(), 1, 65535)
+    
+    -- Текущий URL
+    ui.text(25, 275, current_url, 1, 65535)
+    
+    -- Информация
+    ui.text(125, 470, "webprimitive 0.1", 1, 65535)
+    
+    -- Назад
+    if ui.button(255, 405, 120, 45, "back", 10665) then
+        currentPage = "main"
+    end
+end
+
+function draw_urlenter()
+    -- Отображение вводимого URL
+    local display_text = url_input_text
+    if #display_text > 40 then
+        display_text = "..." .. display_text:sub(-37)
+    end
+    ui.text(15, 70, display_text, 2, 65535)
+    
+    -- T9 клавиатура
+    local keys = {
+        {"1", "2", "3"},
+        {"4", "5", "6"},
+        {"7", "8", "9"},
+        {"*", "0", "#"}
+    }
+    
+    for row = 1, 4 do
+        for col = 1, 3 do
+            local key = keys[row][col]
+            local x = 15 + (col-1)*130
+            local y = 175 + (row-1)*65
+            
+            if ui.button(x, y, 120, 55, key, 10665) then
+                handle_t9_key(key)
+            end
+            
+            -- Показываем символы под клавишей
+            if t9_keys[key] then
+                ui.text(x + 5, y + 35, t9_keys[key]:sub(1, 3), 1, 0xFFFF)
+            end
+        end
+    end
+    
+    -- Специальные кнопки
+    if ui.button(15, 435, 70, 60, "DEL", 0xF800) then
+        url_input_text = url_input_text:sub(1, -2)
+        last_t9_key = ""
+    end
+    
+    if ui.button(95, 435, 105, 60, "cancel", 10665) then
+        currentPage = "main"
+    end
+    
+    if ui.button(210, 435, 110, 60, "go", 0x07E0) then
+        if #url_input_text > 0 then
+            load_page(url_input_text)
+            currentPage = "main"
+        end
+    end
+    
+    if ui.button(330, 435, 70, 60, "CLR", 0xFD20) then
+        url_input_text = ""
+        last_t9_key = ""
+    end
+end
+
+function draw()
+    ui.rect(0, 0, 410, 502, 0) -- Чёрный фон
+    
+    if currentPage == "main" then
+        draw_main()
+    elseif currentPage == "quickmenu" then
+        draw_quickmenu()
+    elseif currentPage == "urlenter" then
+        draw_urlenter()
+    end
 end
 
 -- ==========================================
--- ИНИЦИАЛИЗАЦИЯ
+-- Инициализация
 -- ==========================================
 
 -- Загружаем стартовую страницу
