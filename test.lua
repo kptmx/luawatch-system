@@ -10,7 +10,7 @@ history_pos = 0
 web_content_scroll = 0
 web_content = {}
 web_content_height = 0
-MAX_CHARS_PER_LINE = 24
+MAX_CHARS_PER_LINE = 38
 LINE_H = 28
 LINK_H = 36
 
