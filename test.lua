@@ -90,34 +90,113 @@ local function remove_junk(html)
     return html
 end
 
+local function utf8_len(str)
+    local _, count = string.gsub(str, "[^\128-\193]", "")
+    return count
+end
+
+local function utf8_sub(str, start_char, end_char)
+    local chars = {}
+    for uchar in string.gmatch(str, "([%z\1-\127\194-\244][\128-\191]*)") do
+        table.insert(chars, uchar)
+    end
+    
+    local result = ""
+    end_char = end_char or #chars
+    for i = math.max(1, start_char), math.min(end_char, #chars) do
+        result = result .. chars[i]
+    end
+    return result
+end
+
 local function wrap_text(text)
-    if #text <= MAX_CHARS_PER_LINE then
+    local char_len = utf8_len(text)
+    if char_len <= MAX_CHARS_PER_LINE then
         return {text}
     end
     
     local lines = {}
-    local current = ""
-    local words = {}
+    local current_line = ""
+    local current_len = 0
     
-    for word in text:gmatch("%S+") do
-        table.insert(words, word)
+    -- Разбиваем на отдельные UTF-8 символы
+    local chars = {}
+    for uchar in string.gmatch(text, "([%z\1-\127\194-\244][\128-\191]*)") do
+        table.insert(chars, uchar)
     end
     
-    for i, word in ipairs(words) do
-        if #current + #word + 1 <= MAX_CHARS_PER_LINE or #current == 0 then
-            if #current > 0 then
-                current = current .. " " .. word
+    local i = 1
+    while i <= #chars do
+        local char = chars[i]
+        
+        -- Если символ пробел - обрабатываем отдельно
+        if char == " " then
+            if current_len + 1 <= MAX_CHARS_PER_LINE then
+                current_line = current_line .. char
+                current_len = current_len + 1
             else
-                current = word
+                table.insert(lines, current_line)
+                current_line = ""
+                current_len = 0
+                -- Не увеличиваем i, чтобы пробел попал в новую строку
             end
+            i = i + 1
         else
-            table.insert(lines, current)
-            current = word
+            -- Получаем слово
+            local word = ""
+            local word_len = 0
+            while i <= #chars and chars[i] ~= " " do
+                word = word .. chars[i]
+                word_len = word_len + 1
+                i = i + 1
+            end
+            
+            if word_len == 0 then
+                i = i + 1
+                goto continue
+            end
+            
+            -- Если слово слишком длинное для одной строки
+            if word_len > MAX_CHARS_PER_LINE then
+                if current_len > 0 then
+                    table.insert(lines, current_line)
+                    current_line = ""
+                    current_len = 0
+                end
+                
+                -- Разбиваем слишком длинное слово
+                local j = 1
+                while j <= word_len do
+                    local part = ""
+                    local part_len = 0
+                    while j <= word_len and part_len < MAX_CHARS_PER_LINE do
+                        part = part .. chars[j]
+                        part_len = part_len + 1
+                        j = j + 1
+                    end
+                    table.insert(lines, part)
+                end
+            else
+                -- Обычное слово
+                if current_len == 0 then
+                    current_line = word
+                    current_len = word_len
+                elseif current_len + 1 + word_len <= MAX_CHARS_PER_LINE then
+                    current_line = current_line .. " " .. word
+                    current_len = current_len + 1 + word_len
+                else
+                    table.insert(lines, current_line)
+                    current_line = word
+                    current_len = word_len
+                end
+            end
         end
+        
+        ::continue::
     end
     
-    if #current > 0 then
-        table.insert(lines, current)
+    if current_len > 0 then
+        table.insert(lines, current_line)
     end
     
     return lines
