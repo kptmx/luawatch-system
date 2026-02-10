@@ -3,6 +3,10 @@
 
 SCR_W = 410
 SCR_H = 502
+CONTENT_AREA_Y = 35
+CONTENT_AREA_H = 370
+INTERFACE_Y = 410
+
 currentPage = "main"
 current_url = "https://google.com"
 history = {}
@@ -10,9 +14,11 @@ history_pos = 0
 web_content_scroll = 0
 web_content = {}
 web_content_height = 0
-MAX_CHARS_PER_LINE = 38
 LINE_H = 28
 LINK_H = 36
+
+-- Максимальное количество СИМВОЛОВ (не байтов) в строке
+MAX_CHARS_PER_LINE = 28
 
 -- T9 клавиатура
 local t9_keys = {
@@ -34,6 +40,101 @@ local url_input_text = ""
 local last_t9_key = ""
 local last_t9_time = 0
 local t9_char_index = 1
+
+-- ==========================================
+-- UTF-8 утилиты
+-- ==========================================
+
+-- Функция для подсчёта символов в UTF-8 строке
+function utf8_len(str)
+    local count = 0
+    local i = 1
+    while i <= #str do
+        local b = str:byte(i)
+        if b < 128 then
+            i = i + 1
+        elseif b < 224 then
+            i = i + 2
+        elseif b < 240 then
+            i = i + 3
+        else
+            i = i + 4
+        end
+        count = count + 1
+    end
+    return count
+end
+
+-- Функция для получения подстроки UTF-8
+function utf8_sub(str, start_char, end_char)
+    local result = ""
+    local char_count = 0
+    local i = 1
+    
+    while i <= #str do
+        char_count = char_count + 1
+        
+        if char_count >= start_char then
+            local char_start = i
+            local b = str:byte(i)
+            
+            if b < 128 then
+                i = i + 1
+            elseif b < 224 then
+                i = i + 2
+            elseif b < 240 then
+                i = i + 3
+            else
+                i = i + 4
+            end
+            
+            result = result .. str:sub(char_start, i - 1)
+            
+            if end_char and char_count >= end_char then
+                break
+            end
+        else
+            -- Пропускаем символ
+            local b = str:byte(i)
+            if b < 128 then
+                i = i + 1
+            elseif b < 224 then
+                i = i + 2
+            elseif b < 240 then
+                i = i + 3
+            else
+                i = i + 4
+            end
+        end
+    end
+    
+    return result
+end
+
+-- Разделение строки на символы UTF-8
+function utf8_chars(str)
+    local chars = {}
+    local i = 1
+    while i <= #str do
+        local b = str:byte(i)
+        local char_len
+        
+        if b < 128 then
+            char_len = 1
+        elseif b < 224 then
+            char_len = 2
+        elseif b < 240 then
+            char_len = 3
+        else
+            char_len = 4
+        end
+        
+        table.insert(chars, str:sub(i, i + char_len - 1))
+        i = i + char_len
+    end
+    
+    return chars
+end
 
 -- ==========================================
 -- HTML парсинг (без изображений)
@@ -72,6 +173,9 @@ local function decode_html_entities(str)
     str = str:gsub("&#(%d+);", function(code)
         return string.char(tonumber(code))
     end)
+    str = str:gsub("&#x(%x+);", function(code)
+        return string.char(tonumber(code, 16))
+    end)
     return str
 end
 
@@ -91,7 +195,8 @@ local function remove_junk(html)
 end
 
 local function wrap_text(text)
-    if #text <= MAX_CHARS_PER_LINE then
+    local char_count = utf8_len(text)
+    if char_count <= MAX_CHARS_PER_LINE then
         return {text}
     end
     
@@ -99,24 +204,61 @@ local function wrap_text(text)
     local current = ""
     local words = {}
     
-    for word in text:gmatch("%S+") do
-        table.insert(words, word)
+    -- Разбиваем на слова с учётом UTF-8
+    local i = 1
+    while i <= #text do
+        local word_start = i
+        local in_word = false
+        
+        while i <= #text do
+            local b = text:byte(i)
+            
+            -- Проверяем, является ли символ пробельным
+            if b == 32 or b == 9 or b == 10 or b == 13 then -- space, tab, newline, carriage return
+                if in_word then
+                    break
+                else
+                    -- Пропускаем ведущие пробелы
+                    i = i + 1
+                    word_start = i
+                end
+            else
+                in_word = true
+                -- Переходим к следующему символу UTF-8
+                if b < 128 then
+                    i = i + 1
+                elseif b < 224 then
+                    i = i + 2
+                elseif b < 240 then
+                    i = i + 3
+                else
+                    i = i + 4
+                end
+            end
+        end
+        
+        if in_word then
+            local word = text:sub(word_start, i - 1)
+            table.insert(words, word)
+        end
     end
     
-    for i, word in ipairs(words) do
-        if #current + #word + 1 <= MAX_CHARS_PER_LINE or #current == 0 then
-            if #current > 0 then
-                current = current .. " " .. word
-            else
-                current = word
-            end
+    -- Формируем строки
+    for _, word in ipairs(words) do
+        local current_len = utf8_len(current)
+        local word_len = utf8_len(word)
+        
+        if current_len == 0 then
+            current = word
+        elseif current_len + 1 + word_len <= MAX_CHARS_PER_LINE then
+            current = current .. " " .. word
         else
             table.insert(lines, current)
             current = word
         end
     end
     
-    if #current > 0 then
+    if current ~= "" then
         table.insert(lines, current)
     end
     
@@ -203,8 +345,8 @@ local function parse_html(html)
     end
     
     -- Минимальная высота для скролла
-    if web_content_height < SCR_H - 100 then
-        web_content_height = SCR_H - 100
+    if web_content_height < CONTENT_AREA_H then
+        web_content_height = CONTENT_AREA_H
     end
 end
 
@@ -226,7 +368,7 @@ function load_page(new_url)
         web_content_scroll = 0
     else
         web_content = {}
-        web_content_height = SCR_H - 100
+        web_content_height = CONTENT_AREA_H
         add_content("Ошибка загрузки", false)
         add_content("URL: " .. new_url, false)
         add_content("Код: " .. tostring(res.code or "—"), false)
@@ -268,71 +410,119 @@ end
 -- ==========================================
 
 function draw_web_content()
-    -- Устанавливаем скролл только для контентной области
-    local visible_height = SCR_H - 100
-    web_content_scroll = ui.beginList(0, 35, SCR_W, visible_height, web_content_scroll, web_content_height)
+    -- Используем pushClip для ограничения области отрисовки контента
+    ui.pushClip(0, CONTENT_AREA_Y, SCR_W, CONTENT_AREA_H)
     
-    local cy = 0
+    -- Получаем смещение для скролла
+    local scroll_offset = web_content_scroll
+    
+    local cy = -scroll_offset
     for idx, item in ipairs(web_content) do
-        if item.type == "text" then
-            if item.text ~= "" then
-                ui.text(20, cy, item.text, 2, 0xFFFF)
-                cy = cy + LINE_H
-            else
-                cy = cy + LINE_H / 2
+        -- Проверяем, виден ли элемент в клиппированной области
+        if cy + LINE_H >= 0 and cy < CONTENT_AREA_H then
+            if item.type == "text" then
+                if item.text ~= "" then
+                    ui.text(20, CONTENT_AREA_Y + cy, item.text, 2, 0xFFFF)
+                end
+            elseif item.type == "link" then
+                -- Рисуем кнопку-ссылку
+                local btn_y = CONTENT_AREA_Y + cy
+                
+                -- Проверяем, находится ли эта позиция в области контента
+                if btn_y >= CONTENT_AREA_Y and btn_y + LINK_H <= CONTENT_AREA_Y + CONTENT_AREA_H then
+                    if ui.button(10, cy, SCR_W - 20, LINK_H, "", 0x0101) then
+                        load_page(item.url)
+                    end
+                    ui.text(25, cy + 6, item.text, 2, 0x07FF)
+                end
             end
-        elseif item.type == "link" then
-            local clicked = ui.button(10, cy, SCR_W - 20, LINK_H, "", 0x0101)
-            ui.text(25, cy + 6, item.text, 2, 0x07FF)
-            if clicked then
-                load_page(item.url)
-            end
-            cy = cy + LINK_H
+        end
+        
+        cy = cy + (item.type == "link" and LINK_H or LINE_H)
+        
+        -- Прекращаем отрисовку, если вышли за пределы видимой области
+        if cy > CONTENT_AREA_H + scroll_offset then
+            break
         end
     end
     
-    ui.endList()
+    ui.resetClip()
 end
 
 function draw_interface()
+    -- Верхняя панель с временем и батареей
+    ui.text(240, 0, hw.getBatt() .. "%", 2, 65535)
+    local time = hw.getTime()
+    ui.text(90, 0, string.format("%02d:%02d", time.h, time.m), 2, 65535)
+    
     -- URL строка (кликабельная)
     local display_url = current_url
-    if #display_url > 30 then
-        display_url = display_url:sub(1, 27) .. "..."
+    local url_chars = utf8_len(display_url)
+    if url_chars > 30 then
+        display_url = utf8_sub(display_url, 1, 27) .. "..."
     end
     
-    if ui.button(0, 410, SCR_W, 30, display_url, 14823) then
+    -- Кнопки внизу экрана - ВНЕ области контента
+    local bottom_y = INTERFACE_Y
+    
+    if ui.button(0, bottom_y, SCR_W, 30, display_url, 14823) then
         url_input_text = current_url
         currentPage = "urlenter"
     end
     
-    -- Панель управления
-    if ui.button(60, 445, 90, 40, "back", 10665) then
+    -- Панель управления (ещё ниже)
+    local controls_y = bottom_y + 40
+    if ui.button(60, controls_y, 90, 40, "back", 10665) then
         go_back()
     end
     
-    if ui.button(155, 445, 80, 40, "reld", 10665) then
+    if ui.button(155, controls_y, 80, 40, "reld", 10665) then
         load_page(current_url)
     end
     
-    if ui.button(240, 445, 115, 40, "menu", 14792) then
+    if ui.button(240, controls_y, 115, 40, "menu", 14792) then
         currentPage = "quickmenu"
     end
     
-    -- Статус
-    ui.text(110, 485, "Ready", 1, 65535)
+    -- Статус в самом низу
+    ui.text(110, SCR_H - 15, "Ready", 1, 65535)
+end
+
+-- Простой скролл жестом
+local last_touch_y = 0
+local is_scrolling = false
+
+function update_scroll()
+    local ts = ui.getTouch()
     
-    -- Батарея и время
-    ui.text(240, 0, hw.getBatt() .. "%", 2, 65535)
-    
-    local time = hw.getTime()
-    ui.text(90, 0, string.format("%02d:%02d", time.h, time.m), 2, 65535)
+    if ts.touching then
+        -- Проверяем, находится ли касание в области контента
+        if ts.y >= CONTENT_AREA_Y and ts.y <= CONTENT_AREA_Y + CONTENT_AREA_H then
+            if not is_scrolling then
+                last_touch_y = ts.y
+                is_scrolling = true
+            else
+                local delta = last_touch_y - ts.y
+                web_content_scroll = web_content_scroll + delta
+                last_touch_y = ts.y
+                
+                -- Ограничиваем скролл
+                local max_scroll = math.max(0, web_content_height - CONTENT_AREA_H)
+                if web_content_scroll < 0 then
+                    web_content_scroll = 0
+                elseif web_content_scroll > max_scroll then
+                    web_content_scroll = max_scroll
+                end
+            end
+        end
+    else
+        is_scrolling = false
+    end
 end
 
 function draw_quickmenu()
     -- Добавить в закладки
     if ui.button(20, 100, 180, 60, "add to bm", 10665) then
-        -- Сохранить URL в файл закладок
         local bookmarks = fs.load("/bookmarks.txt") or ""
         if not bookmarks:find(current_url) then
             fs.append("/bookmarks.txt", current_url .. "\n")
@@ -342,13 +532,11 @@ function draw_quickmenu()
     
     -- Показать закладки
     if ui.button(210, 100, 180, 60, "bookmarks", 10665) then
-        -- Здесь можно реализовать просмотр закладок
         currentPage = "main"
     end
     
     -- История
     if ui.button(20, 170, 180, 60, "history", 10665) then
-        -- Здесь можно реализовать просмотр истории
         currentPage = "main"
     end
     
@@ -382,8 +570,9 @@ end
 function draw_urlenter()
     -- Отображение вводимого URL
     local display_text = url_input_text
-    if #display_text > 40 then
-        display_text = "..." .. display_text:sub(-37)
+    local text_chars = utf8_len(display_text)
+    if text_chars > 40 then
+        display_text = "..." .. utf8_sub(display_text, text_chars - 36, text_chars)
     end
     ui.text(15, 70, display_text, 2, 65535)
     
@@ -414,7 +603,12 @@ function draw_urlenter()
     
     -- Специальные кнопки
     if ui.button(15, 435, 70, 60, "DEL", 0xF800) then
-        url_input_text = url_input_text:sub(1, -2)
+        -- Удаляем последний символ UTF-8
+        local chars = utf8_chars(url_input_text)
+        if #chars > 0 then
+            table.remove(chars)
+            url_input_text = table.concat(chars)
+        end
         last_t9_key = ""
     end
     
@@ -439,9 +633,13 @@ function draw()
     ui.rect(0, 0, SCR_W, SCR_H, 0) -- Чёрный фон
     
     if currentPage == "main" then
-        -- Рисуем контент страницы (со скроллом)
+        -- Обновляем скролл
+        update_scroll()
+        
+        -- Рисуем контент страницы
         draw_web_content()
-        -- Рисуем интерфейс поверх (без скролла)
+        
+        -- Рисуем интерфейс поверх
         draw_interface()
         
     elseif currentPage == "quickmenu" then
