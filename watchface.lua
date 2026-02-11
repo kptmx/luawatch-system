@@ -1,187 +1,222 @@
--- Простая читалка текстовых файлов для LuaWatch
--- Поддержка: выбор из Flash/SD, бесконечный скролл с буфером из 3 страниц, snap к страницам
--- Исправления: обработка границ для малых файлов, предотвращение отрицательных страниц, добавлен выход
+-- Читалка текстовых файлов с бесконечной прокруткой
+-- Инициализация переменных
+local currentFile = ""
+local currentSource = "fs" -- "fs" для встроенной памяти, "sd" для SD-карты
+local fileContent = ""
+local totalPages = 0
+local currentPage = 1
+local listScroll = 125 -- Начальная позиция скролла (средняя треть)
+local maxScroll = 375
+local linesPerPage = 25
+local totalLines = 0
+local allLines = {}
+local isLoading = false
+local lastDirection = 0 -- -1 для вверх, 1 для вниз, 0 для бездействия
 
--- Константы
-local SCR_W, SCR_H = 410, 502  -- Размеры экрана (из вашего примера)
-local FONT_SIZE = 1            -- Размер шрифта для текста (1 для unifont ~16px)
-local LINE_HEIGHT = 16         -- Высота строки (для unifont_t_cyrillic)
-local LIST_X, LIST_Y, LIST_W, LIST_H = 5, 65, 400, 375  -- Область списка (из вашего примера)
-local PAGE_LINES = math.floor(LIST_H / LINE_HEIGHT)  -- Строк на страницу (~23 для 375/16)
-local PAGE_HEIGHT = PAGE_LINES * LINE_HEIGHT   -- Высота страницы в пикселях
-local BUFFER_PAGES = 3                         -- Буфер: prev, current, next
-local TOTAL_HEIGHT = BUFFER_PAGES * PAGE_HEIGHT  -- Полная высота виртуального списка
-
--- Состояние приложения
-local mode = "source_select"  -- "source_select", "file_select", "reader", "exit"
-local sources = {"Flash", "SD"}  -- Источники
-local selected_source = 1
-local files = {}              -- Список файлов
-local selected_file = 1
-local text_lines = {}         -- Строки текста (таблица)
-local total_pages = 0         -- Общее страниц в файле
-local current_page = 1        -- Текущая страница (1-based)
-local list_scroll = PAGE_HEIGHT  -- Начальный скролл: на средней странице
-local snap_target = nil       -- Цель для доводки (анимация snap)
-local snap_speed = 0.2        -- Скорость анимации (0.1-0.3 для плавности)
-
--- Функция для получения списка .txt файлов из источника
-local function load_files(source)
-    files = {}
-    local fs_lib = (source == "Flash") and fs or sd
-    local res = fs_lib.list("/")
-    if res then
-        for _, fname in ipairs(res) do
-            if fname:lower():match("%.txt$") then
-                table.insert(files, fname)
-            end
-        end
-        table.sort(files)  -- Сортировка по алфавиту
-    end
-end
-
--- Функция для загрузки и разбивки текста на строки
-local function load_text(source, fname)
-    text_lines = {}
-    local fs_lib = (source == "Flash") and fs or sd
-    local res = fs_lib.readBytes("/" .. fname)
-    if res and res.ok then
-        local text = res[1]  -- lstring
-        for line in text:gmatch("([^\n]*)\n?") do
-            table.insert(text_lines, line)
-        end
-        total_pages = math.ceil(#text_lines / PAGE_LINES)
-        if total_pages == 0 then total_pages = 1 end  -- Минимум 1 страница для пустого файла
-        current_page = 1
-        list_scroll = PAGE_HEIGHT
+-- Функция для загрузки файла
+function loadFile(path, source)
+    if not path or path == "" then return false end
+    
+    -- Очистка предыдущего содержимого
+    allLines = {}
+    totalLines = 0
+    totalPages = 0
+    currentPage = 1
+    listScroll = 125
+    isLoading = true
+    
+    -- Определение источника и чтение файла
+    local result
+    if source == "sd" then
+        result = sd.readBytes(path)
     else
-        -- Ошибка: вернуться к выбору файлов
-        mode = "file_select"
+        result = fs.readBytes(path)
+    end
+    
+    if result and result.ok then
+        -- Разделение текста на строки
+        for line in result.body:gmatch("[^\r\n]+") do
+            table.insert(allLines, line)
+        end
+        totalLines = #allLines
+        totalPages = math.ceil(totalLines / linesPerPage)
+        currentFile = path
+        currentSource = source
+        
+        -- Установка скролла на середину (вторая треть)
+        listScroll = 125
+        return true
+    else
+        return false
     end
 end
 
--- Функция для рендеринга страницы текста на заданной y-позиции
-local function render_page(page, base_y)
-    if page < 1 or page > total_pages then return end
-    local start_line = (page - 1) * PAGE_LINES + 1
-    local end_line = math.min(start_line + PAGE_LINES - 1, #text_lines)
-    local y = base_y
-    for i = start_line, end_line do
-        ui.text(10, y, text_lines[i], FONT_SIZE, 0xFFFF)  -- Белый текст, отступ слева
-        y = y + LINE_HEIGHT
+-- Функция для получения строк для текущей страницы
+function getCurrentPageLines()
+    local startIdx = (currentPage - 1) * linesPerPage + 1
+    local endIdx = math.min(startIdx + linesPerPage - 1, totalLines)
+    local pageLines = {}
+    
+    for i = startIdx, endIdx do
+        table.insert(pageLines, allLines[i])
     end
+    
+    return pageLines
 end
 
--- Обновление буфера страниц при перелистывании
-local function update_buffer()
-    if list_scroll >= 2 * PAGE_HEIGHT and current_page < total_pages - 1 then
-        -- Перешли вниз: сдвигаем буфер
-        current_page = current_page + 1
-        list_scroll = list_scroll - PAGE_HEIGHT
-    elseif list_scroll < PAGE_HEIGHT and current_page > 1 then
-        -- Перешли вверх: сдвигаем буфер
-        current_page = current_page - 1
-        list_scroll = list_scroll + PAGE_HEIGHT
+-- Функция для обновления списка при прокрутке
+function updateListOnScroll()
+    -- Определение направления скролла
+    if listScroll < 50 then
+        -- Прокрутка вверх
+        if currentPage > 1 and lastDirection ~= -1 then
+            currentPage = currentPage - 1
+            lastDirection = -1
+            -- Сброс скролла на середину
+            listScroll = 125
+        end
+    elseif listScroll > 200 then
+        -- Прокрутка вниз
+        if currentPage < totalPages and lastDirection ~= 1 then
+            currentPage = currentPage + 1
+            lastDirection = 1
+            -- Сброс скролла на середину
+            listScroll = 125
+        end
+    else
+        -- В средней зоне, сбрасываем направление
+        lastDirection = 0
     end
-    -- Ограничения (на всякий случай)
-    current_page = math.max(1, current_page)
-    current_page = math.min(total_pages - 1, current_page)
-end
-
--- Логика snap: вычислить ближайшую границу страницы с учетом границ
-local function get_snap_target(sy)
-    local page_idx = math.floor(sy / PAGE_HEIGHT + 0.5)
-    local min_idx = (current_page == 1) and 1 or 0
-    local max_idx = (current_page + 1 > total_pages) and 1 or 2
-    page_idx = math.max(min_idx, math.min(max_idx, page_idx))
-    return page_idx * PAGE_HEIGHT
 end
 
 -- Основная функция отрисовки
 function draw()
-    if mode == "exit" then return end  -- Выход из скрипта (прекращаем отрисовку)
-
-    ui.rect(0, 0, SCR_W, SCR_H, 0x0000)  -- Черный фон
-
-    if mode == "source_select" then
-        -- Выбор источника (Flash/SD)
-        ui.text(100, 100, "Select Source:", 2, 0xFFFF)
-        for i, src in ipairs(sources) do
-            local color = (i == selected_source) and 0x07E0 or 0x4208  -- Зеленый/серый
-            if ui.button(100, 150 + (i-1)*60, 200, 50, src, color) then
-                load_files(src)
-                mode = "file_select"
-            end
-        end
-
-    elseif mode == "file_select" then
-        -- Список файлов
-        ui.text(100, 20, "Select File:", 2, 0xFFFF)
-        list_scroll = ui.beginList(LIST_X, LIST_Y, LIST_W, LIST_H, list_scroll, #files * 30)  -- Пример: 30px на файл
-        local y = 0
-        for i, fname in ipairs(files) do
-            local color = (i == selected_file) and 0x07E0 or 0x4208
-            if ui.button(0, y, LIST_W, 28, fname, color) then
-                load_text(sources[selected_source], fname)
-                mode = "reader"
-            end
-            y = y + 30
-        end
-        ui.endList()
-        -- Кнопка назад
-        if ui.button(10, 10, 100, 40, "Back", 0xF800) then
-            mode = "source_select"
-        end
-        -- Кнопка выхода
-        if ui.button(300, 10, 100, 40, "Exit", 0xF800) then
-            mode = "exit"
-        end
-
-    elseif mode == "reader" then
-        -- Читалка: список с буфером 3 страниц
-        -- Сначала обработка snap и обновления буфера
-        local touch = ui.getTouch()
-        if not touch.touching then
-            -- Нет касания: применяем snap/анимацию
-            if snap_target == nil then
-                snap_target = get_snap_target(list_scroll)
-            end
-            -- Анимация к цели
-            local delta = snap_target - list_scroll
-            if math.abs(delta) > 1 then
-                list_scroll = list_scroll + delta * snap_speed
-            else
-                list_scroll = snap_target
-                snap_target = nil
-                -- После snap: проверить и обновить буфер (если перешли границу)
-                update_buffer()
-            end
-        else
-            -- Касание: сбрасываем цель snap
-            snap_target = nil
-        end
-
-        -- Рендеринг виртуального списка
-        list_scroll = ui.beginList(LIST_X, LIST_Y, LIST_W, LIST_H, list_scroll, TOTAL_HEIGHT)
-        -- Рендерим 3 страницы: prev, current, next
-        render_page(current_page - 1, 0)
-        render_page(current_page, PAGE_HEIGHT)
-        render_page(current_page + 1, 2 * PAGE_HEIGHT)
-        ui.endList()
-
-        -- Инфо: страница / всего
-        ui.text(10, 10, "Page " .. current_page .. "/" .. total_pages, 2, 0xFFFF)
-        -- Кнопка назад
-        if ui.button(200, 10, 100, 40, "Back", 0xF800) then
-            mode = "file_select"
-            list_scroll = 0  -- Сброс скролла для списка файлов
-        end
-        -- Кнопка выхода
-        if ui.button(300, 10, 100, 40, "Exit", 0xF800) then
-            mode = "exit"
-        end
-
+    -- Фон
+    ui.rect(0, 0, 410, 502, 0)
+    
+    -- Заголовок
+    ui.text(10, 10, "Text Reader", 2, 0xFFFF)
+    
+    -- Информация о файле и текущей странице
+    if currentFile ~= "" then
+        local fileName = currentFile:match("([^/]+)$") or currentFile
+        ui.text(10, 35, fileName .. " [" .. currentPage .. "/" .. totalPages .. "]", 1, 0xC618)
     end
-
-    ui.flush()
+    
+    -- Кнопка выбора файла
+    if ui.button(300, 5, 100, 30, "Select File", 0x4208) then
+        showFileSelector = not showFileSelector
+    end
+    
+    -- Область текста
+    ui.rect(5, 65, 400, 375, 0x2104)
+    
+    -- Список с текстом
+    listScroll = ui.beginList(5, 65, 400, 375, listScroll, 1125) -- 375 * 3 = 1125
+    
+    -- Обновление списка при прокрутке
+    updateListOnScroll()
+    
+    -- Отображение текущей страницы
+    local lines = getCurrentPageLines()
+    for i, line in ipairs(lines) do
+        ui.text(10, 70 + (i-1) * 15, line, 1, 0xFFFF)
+    end
+    
+    ui.endList()
+    
+    -- Навигационные кнопки
+    if ui.button(5, 450, 100, 40, "Prev", 0x4208) and currentPage > 1 then
+        currentPage = currentPage - 1
+        listScroll = 125
+    end
+    
+    if ui.button(155, 450, 100, 40, "Menu", 0x8410) then
+        showFileSelector = not showFileSelector
+    end
+    
+    if ui.button(305, 450, 100, 40, "Next", 0x4208) and currentPage < totalPages then
+        currentPage = currentPage + 1
+        listScroll = 125
+    end
+    
+    -- Селектор файлов (показывается при необходимости)
+    if showFileSelector then
+        drawFileSelector()
+    end
 end
+
+-- Функция отрисовки селектора файлов
+function drawFileSelector()
+    -- Полупрозрачный фон
+    ui.rect(0, 0, 410, 502, 0x8000)
+    
+    -- Окно селектора
+    ui.fillRoundRect(30, 50, 350, 400, 10, 0x0000)
+    ui.roundRect(30, 50, 350, 400, 10, 0xFFFF)
+    
+    ui.text(150, 70, "Select File", 2, 0xFFFF)
+    
+    -- Кнопки выбора источника
+    local fsColor = currentSource == "fs" and 0xF800 or 0x4208
+    local sdColor = currentSource == "sd" and 0xF800 or 0x4208
+    
+    if ui.button(50, 100, 140, 30, "Internal", fsColor) then
+        currentSource = "fs"
+        fileList = getFileList(currentSource)
+    end
+    
+    if ui.button(220, 100, 140, 30, "SD Card", sdColor) then
+        currentSource = "sd"
+        fileList = getFileList(currentSource)
+    end
+    
+    -- Список файлов
+    fileScroll = ui.beginList(50, 140, 310, 250, fileScroll or 0, #fileList * 25)
+    
+    for i, file in ipairs(fileList) do
+        if ui.button(50, 140 + (i-1) * 25, 310, 25, file, 0x2104) then
+            if loadFile(file, currentSource) then
+                showFileSelector = false
+            end
+        end
+    end
+    
+    ui.endList()
+    
+    -- Кнопка закрытия
+    if ui.button(160, 400, 90, 30, "Close", 0x8410) then
+        showFileSelector = false
+    end
+end
+
+-- Функция для получения списка файлов
+function getFileList(source)
+    local files = {}
+    
+    if source == "sd" and sd_ok then
+        local result = sd.list("/")
+        if result and result.ok then
+            for i, file in ipairs(result) do
+                if file:match("%.txt$") or file:match("%.lua$") or file:match("%.md$") then
+                    table.insert(files, file)
+                end
+            end
+        end
+    else
+        local result = fs.list("/")
+        if result and result.ok then
+            for i, file in ipairs(result) do
+                if file:match("%.txt$") or file:match("%.lua$") or file:match("%.md$") then
+                    table.insert(files, file)
+                end
+            end
+        end
+    end
+    
+    return files
+end
+
+-- Инициализация
+fileList = getFileList(currentSource)
+showFileSelector = false
