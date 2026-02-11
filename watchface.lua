@@ -1,5 +1,6 @@
 -- Простая читалка текстовых файлов для LuaWatch
 -- Поддержка: выбор из Flash/SD, бесконечный скролл с буфером из 3 страниц, snap к страницам
+-- Исправления: обработка границ для малых файлов, предотвращение отрицательных страниц, добавлен выход
 
 -- Константы
 local SCR_W, SCR_H = 410, 502  -- Размеры экрана (из вашего примера)
@@ -12,7 +13,7 @@ local BUFFER_PAGES = 3                         -- Буфер: prev, current, nex
 local TOTAL_HEIGHT = BUFFER_PAGES * PAGE_HEIGHT  -- Полная высота виртуального списка
 
 -- Состояние приложения
-local mode = "source_select"  -- "source_select", "file_select", "reader"
+local mode = "source_select"  -- "source_select", "file_select", "reader", "exit"
 local sources = {"Flash", "SD"}  -- Источники
 local selected_source = 1
 local files = {}              -- Список файлов
@@ -50,6 +51,7 @@ local function load_text(source, fname)
             table.insert(text_lines, line)
         end
         total_pages = math.ceil(#text_lines / PAGE_LINES)
+        if total_pages == 0 then total_pages = 1 end  -- Минимум 1 страница для пустого файла
         current_page = 1
         list_scroll = PAGE_HEIGHT
     else
@@ -72,31 +74,33 @@ end
 
 -- Обновление буфера страниц при перелистывании
 local function update_buffer()
-    if list_scroll >= 2 * PAGE_HEIGHT then
+    if list_scroll >= 2 * PAGE_HEIGHT and current_page < total_pages - 1 then
         -- Перешли вниз: сдвигаем буфер
         current_page = current_page + 1
         list_scroll = list_scroll - PAGE_HEIGHT
-    elseif list_scroll < PAGE_HEIGHT then
+    elseif list_scroll < PAGE_HEIGHT and current_page > 1 then
         -- Перешли вверх: сдвигаем буфер
         current_page = current_page - 1
         list_scroll = list_scroll + PAGE_HEIGHT
     end
-    -- Ограничения
-    if current_page < 1 then current_page = 1; list_scroll = 0 end
-    if current_page > total_pages - 1 then
-        current_page = total_pages - 1
-        list_scroll = 2 * PAGE_HEIGHT
-    end
+    -- Ограничения (на всякий случай)
+    current_page = math.max(1, current_page)
+    current_page = math.min(total_pages - 1, current_page)
 end
 
--- Логика snap: вычислить ближайшую границу страницы
+-- Логика snap: вычислить ближайшую границу страницы с учетом границ
 local function get_snap_target(sy)
-    local page_idx = math.floor(sy / PAGE_HEIGHT + 0.5)  -- Ближайшая (с округлением)
+    local page_idx = math.floor(sy / PAGE_HEIGHT + 0.5)
+    local min_idx = (current_page == 1) and 1 or 0
+    local max_idx = (current_page + 1 > total_pages) and 1 or 2
+    page_idx = math.max(min_idx, math.min(max_idx, page_idx))
     return page_idx * PAGE_HEIGHT
 end
 
 -- Основная функция отрисовки
 function draw()
+    if mode == "exit" then return end  -- Выход из скрипта (прекращаем отрисовку)
+
     ui.rect(0, 0, SCR_W, SCR_H, 0x0000)  -- Черный фон
 
     if mode == "source_select" then
@@ -127,6 +131,10 @@ function draw()
         -- Кнопка назад
         if ui.button(10, 10, 100, 40, "Back", 0xF800) then
             mode = "source_select"
+        end
+        -- Кнопка выхода
+        if ui.button(300, 10, 100, 40, "Exit", 0xF800) then
+            mode = "exit"
         end
 
     elseif mode == "reader" then
@@ -164,9 +172,13 @@ function draw()
         -- Инфо: страница / всего
         ui.text(10, 10, "Page " .. current_page .. "/" .. total_pages, 2, 0xFFFF)
         -- Кнопка назад
-        if ui.button(300, 10, 100, 40, "Back", 0xF800) then
+        if ui.button(200, 10, 100, 40, "Back", 0xF800) then
             mode = "file_select"
             list_scroll = 0  -- Сброс скролла для списка файлов
+        end
+        -- Кнопка выхода
+        if ui.button(300, 10, 100, 40, "Exit", 0xF800) then
+            mode = "exit"
         end
 
     end
