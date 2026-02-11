@@ -1,4 +1,4 @@
--- Reader.lua — простая читалка с доводкой и прогрессбаром
+-- Reader.lua — простая читалка с доводкой и прогрессбаром (без утечек)
 local SCR_W, SCR_H = 410, 502
 local LIST_X, LIST_Y, LIST_W, LIST_H = 5, 65, 400, 375
 
@@ -7,6 +7,7 @@ local source = "flash"           -- "flash" или "sd"
 local files = {}
 local file_scroll = 0
 
+-- Данные текущего файла (очищаем при закрытии)
 local selected_file = nil
 local full_path = nil
 local text_lines = {}            
@@ -24,6 +25,23 @@ local LINES_PER_PAGE = math.floor((LIST_H - TOP_MARGIN * 2) / LINE_H)
 local MAX_CHARS_PER_LINE = 52    
 
 -- ===================================================================
+-- Очистка памяти
+-- ===================================================================
+local function clear_file_data()
+    -- Очищаем таблицы, чтобы сборщик мусора мог их удалить
+    text_lines = {}
+    pages = {}
+    selected_file = nil
+    full_path = nil
+    total_pages = 0
+    current_page_idx = 1
+    
+    -- Принудительно запускаем сборку мусора
+    collectgarbage()
+    collectgarbage()
+end
+
+-- ===================================================================
 -- Утилиты
 -- ===================================================================
 local function get_fs()
@@ -33,7 +51,10 @@ end
 local function refresh_file_list()
     local fs_obj = get_fs()
     local raw = fs_obj.list("/") or {}
+    
+    -- Очищаем предыдущий список
     files = {}
+    
     for _, name in ipairs(raw) do
         if name ~= "" and not name:match("/$") then
             table.insert(files, name)
@@ -44,7 +65,17 @@ end
 
 local function wrap_text(raw_text)
     local lines = {}
+    local line_count = 0
+    
     for line in (raw_text .. "\n"):gmatch("([^\n]*)\n") do
+        line_count = line_count + 1
+        
+        -- Защита от слишком больших файлов
+        if line_count > 5000 then
+            table.insert(lines, "[Файл слишком большой, показана только часть]")
+            break
+        end
+        
         if #line == 0 then
             table.insert(lines, "")
         elseif #line <= MAX_CHARS_PER_LINE then
@@ -69,21 +100,35 @@ local function wrap_text(raw_text)
 end
 
 local function build_pages()
+    -- Очищаем предыдущие страницы
     pages = {}
+    
     local cur_page = {}
+    local page_count = 0
+    
     for _, ln in ipairs(text_lines) do
         table.insert(cur_page, ln)
         if #cur_page >= LINES_PER_PAGE then
+            page_count = page_count + 1
             table.insert(pages, cur_page)
             cur_page = {}
         end
     end
-    if #cur_page > 0 then table.insert(pages, cur_page) end
+    if #cur_page > 0 then
+        table.insert(pages, cur_page)
+    end
+    
     total_pages = #pages
-    if total_pages == 0 then total_pages = 1 end
+    if total_pages == 0 then 
+        total_pages = 1
+        pages = {{"[Пустой файл]"}}
+    end
 end
 
 local function open_file(path)
+    -- Очищаем память перед открытием нового файла
+    clear_file_data()
+    
     local fs_obj = get_fs()
     local content
 
@@ -96,13 +141,26 @@ local function open_file(path)
         content = res
     end
 
+    -- Проверяем размер
+    if #content > 100 * 1024 then  -- 100KB лимит для безопасности
+        return false, "Файл слишком большой (" .. math.floor(#content/1024) .. "KB)"
+    end
+
     selected_file = path:gsub("^/", "")
     full_path = path
     text_lines = wrap_text(content)
+    
+    -- Очищаем сырой контент сразу после использования
+    content = nil
+    
     build_pages()
     current_page_idx = 1
     reader_scroll = LIST_H  -- центр
     mode = "reader"
+    
+    -- Запускаем сборку мусора
+    collectgarbage()
+    
     return true
 end
 
@@ -189,6 +247,8 @@ function draw()
             source = "flash"
             refresh_file_list()
             file_scroll = 0
+            -- Очищаем данные файла при смене источника
+            clear_file_data()
         end
         
         local sd_label = sd_ok and "SD-карта" or "SD нет"
@@ -198,6 +258,7 @@ function draw()
                 source = "sd"
                 refresh_file_list()
                 file_scroll = 0
+                clear_file_data()
             end
         else
             ui.rect(210, 70, 170, 50, 0x4208)
@@ -242,11 +303,13 @@ function draw()
 
             if pidx >= 1 and pidx <= total_pages then
                 local page_lines = pages[pidx]
-                local page_content_h = #page_lines * LINE_H
-                local start_y = base_y + math.floor((PAGE_H - page_content_h - TOP_MARGIN) / 2)
+                if page_lines then
+                    local page_content_h = #page_lines * LINE_H
+                    local start_y = base_y + math.floor((PAGE_H - page_content_h - TOP_MARGIN) / 2)
 
-                for l, line in ipairs(page_lines) do
-                    ui.text(LEFT_MARGIN, start_y + (l - 1) * LINE_H, line, FONT_SIZE, 65535)
+                    for l, line in ipairs(page_lines) do
+                        ui.text(LEFT_MARGIN, start_y + (l - 1) * LINE_H, line, FONT_SIZE, 65535)
+                    end
                 end
             end
         end
@@ -269,6 +332,8 @@ function draw()
         if ui.button(SCR_W - 100, 8, 90, 35, "Back", 63488) then
             mode = "selector"
             file_scroll = 0
+            -- Очищаем данные файла при выходе
+            clear_file_data()
         end
         
         -- Прогрессбар
@@ -277,11 +342,6 @@ function draw()
 
         -- Подсказка по свайпу
         ui.text(SCR_W - 150, SCR_H - 20, "← свайп →", 1, 0x8410)
-
-        -- Сообщение о пустом файле
-        if total_pages == 1 and #pages[1] == 0 then
-            ui.text(50, 200, "Файл пустой или не текст", 2, 63488)
-        end
     end
 
     ui.flush()
@@ -290,8 +350,12 @@ end
 -- Хелпер для задержки
 function delay(ms)
     local start = hw.millis()
-    while hw.millis() - start < ms do end
+    while hw.millis() - start < ms do 
+        -- просто ждём
+    end
 end
 
 -- Инициализация
 refresh_file_list()
+clear_file_data()  -- Очищаем при старте
+collectgarbage()
