@@ -98,9 +98,7 @@ function draw()
         -- Фильтруем только .txt
         local txt_files = {}
         for _, f in ipairs(files) do
-            if f:match("%.txt$") then
-                table.insert(txt_files, f)
-            end
+            table.insert(txt_files, f)
         end
 
         -- Список файлов
