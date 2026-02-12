@@ -1,135 +1,206 @@
-local SCR_W, SCR_H = 410, 502
-local LINE_HEIGHT = 28
-local LINES_PER_PAGE = math.floor(SCR_H / LINE_HEIGHT)
-local CHARS_PER_LINE = 30 
+-- Simple TXT Reader with file browser and Internal/SD switching
+-- Place as /main.lua
 
-local appMode = "MENU"
+local W, H = 410, 502
+local HEADER_H = 60
+local ITEM_H = 55
+local LINE_HEIGHT = 32
+local TEXT_SIZE = 2
+local MARGIN_X = 20
+local MARGIN_TOP = HEADER_H + 10
+
+local visibleH = H - HEADER_H
+local pageH = visibleH
+local contentH_reader = pageH * 3
+
+local mode = "browser"              -- "browser" or "reader"
+local currentSource = "internal"    -- "internal" or "sd"
 local fileList = {}
+local fileName = ""
+local errorMsg = nil
+local scrollBrowserY = 0
+local scrollY = pageH               -- middle of triple buffer
+
 local lines = {}
-local currentPage = 1
-local totalPages = 1
-local scrollY = SCR_H 
+local linesPerPage = math.floor((visibleH - 20) / LINE_HEIGHT)
+local totalPages = 0
+local currentPage = 0
 
--- Функция сканирования
-local function scanFiles()
+local function refreshFileList()
     fileList = {}
-    local all = sd.list("/")
-    if all then
-        for _, v in ipairs(all) do
-            if string.find(v:lower(), ".txt") then
-                table.insert(fileList, "/sdcard/" .. v)
-            end
-        end
-    end
-    -- Если SD пустая, добавим хотя бы системный лог для проверки
-    if #fileList == 0 then table.insert(fileList, "/main.lua") end
-end
+    errorMsg = nil
 
--- Загрузка книги
-local function loadBook(path)
-    print("Trying to load: " .. path) -- Отладка в консоль Serial
-    local data = sd.readBytes(path)
-    if not data then data = fs.load(path) end
-    
-    if data and #data > 0 then
-        lines = {}
-        -- Безопасный парсинг строк
-        for line in string.gmatch(data, "([^\r\n]+)") do
-            local str = line
-            while #str > CHARS_PER_LINE do
-                table.insert(lines, string.sub(str, 1, CHARS_PER_LINE))
-                str = string.sub(str, CHARS_PER_LINE + 1)
-            end
-            table.insert(lines, str)
-        end
-        
-        totalPages = math.ceil(#lines / LINES_PER_PAGE)
-        currentPage = 1
-        scrollY = SCR_H
-        appMode = "READER"
-        print("Loaded lines: " .. #lines)
+    local res
+    if currentSource == "internal" then
+        res = fs.list("/")
     else
-        print("Failed to load or file empty")
+        if not sd_ok then
+            errorMsg = "SD card not mounted"
+            return
+        end
+        res = sd.list("/")
+    end
+
+    if type(res) ~= "table" then
+        errorMsg = "Failed to list directory"
+        return
+    end
+
+    for _, f in ipairs(res) do
+        if f:lower():match("%.txt$") then
+            table.insert(fileList, f)
+        end
+    end
+    table.sort(fileList)
+end
+
+local function loadFile(path, isSD)
+    local content
+    if isSD then
+        if not sd_ok then return false, "SD not mounted" end
+        content = sd.readBytes(path)
+    else
+        content = fs.readBytes(path)
+    end
+
+    if type(content) ~= "string" then
+        return false, "Failed to read file"
+    end
+
+    lines = {}
+    for line in (content .. "\n"):gmatch("(.-)\r?\n") do
+        table.insert(lines, line)
+    end
+    if #lines > 0 and lines[#lines] == "" then
+        table.remove(lines)
+    end
+
+    totalPages = math.max(1, math.ceil(#lines / linesPerPage))
+    currentPage = 0
+    scrollY = pageH
+    return true
+end
+
+local function drawPage(page, baseY)
+    if page < 0 or page >= totalPages then
+        local msg = page < 0 and "-- Beginning of file --" or "-- End of file --"
+        ui.text(MARGIN_X, baseY + visibleH/2 - 30, msg, 3, 0x8410)
+        return
+    end
+
+    local startLine = page * linesPerPage + 1
+    local endLine = math.min(startLine + linesPerPage - 1, #lines)
+    local y = baseY
+
+    for i = startLine, endLine do
+        ui.text(MARGIN_X, y, lines[i], TEXT_SIZE, 0xFFFF)
+        y = y + LINE_HEIGHT
     end
 end
 
-scanFiles()
+local function drawReader()
+    ui.rect(0, 0, W, H, 0)
+
+    -- Header
+    ui.text(10, 12, fileName, 2, 0xFFFF)
+    ui.text(W - 180, 12, (currentPage + 1) .. "/" .. totalPages, 2, 0xFFFF)
+    if ui.button(W - 110, 8, 100, 44, "Back", 0xF800) then
+        mode = "browser"
+    end
+
+    ui.setListInertia(false)
+    local updatedScroll = ui.beginList(0, HEADER_H, W, visibleH, scrollY, contentH_reader)
+
+    drawPage(currentPage - 1, 0)
+    drawPage(currentPage, pageH)
+    drawPage(currentPage + 1, pageH * 2)
+
+    ui.endList()
+
+    local touch = ui.getTouch()
+    if touch.released then
+        local delta = updatedScroll - pageH
+        local flipped = false
+
+        if delta < -pageH * 0.3 then
+            if currentPage > 0 then
+                currentPage = currentPage - 1
+                flipped = true
+            end
+        elseif delta > pageH * 0.3 then
+            if currentPage < totalPages - 1 then
+                currentPage = currentPage + 1
+                flipped = true
+            end
+        end
+
+        scrollY = pageH
+    else
+        scrollY = updatedScroll
+    end
+end
+
+local function drawBrowser()
+    ui.rect(0, 0, W, H, 0)
+
+    -- Header
+    ui.text(10, 12, "TXT Reader - " .. (currentSource == "internal" and "Internal Flash" or "SD Card"), 2, 0xFFFF)
+
+    local switchLabel = currentSource == "internal" 
+        and (sd_ok and "Switch to SD Card" or "SD not available")
+        or "Switch to Internal Flash"
+    local switchColor = (currentSource == "internal" and sd_ok or currentSource == "sd") and 0x07E0 or 0x8410
+
+    if ui.button(10, 65, 380, 50, switchLabel, switchColor) then
+        if (currentSource == "internal" and sd_ok) or currentSource == "sd" then
+            currentSource = currentSource == "internal" and "sd" or "internal"
+            refreshFileList()
+            scrollBrowserY = 0
+        end
+    end
+
+    if errorMsg then
+        ui.text(20, 150, errorMsg, 3, 0xF800)
+        return
+    end
+
+    if #fileList == 0 then
+        ui.text(20, 180, "No .txt files found", 3, 0x8410)
+        return
+    end
+
+    local contentH_browser = #fileList * ITEM_H
+    ui.setListInertia(true)
+    scrollBrowserY = ui.beginList(0, HEADER_H + 70, W, visibleH - 70, scrollBrowserY, contentH_browser)
+
+    for i, f in ipairs(fileList) do
+        local y = (i - 1) * ITEM_H
+        if ui.button(10, y, W - 20, ITEM_H - 8, f, 0x0528) then
+            local fullPath = "/" .. f
+            local ok, err = loadFile(fullPath, currentSource == "sd")
+            if ok then
+                fileName = f
+                mode = "reader"
+            else
+                errorMsg = err or "Load failed"
+            end
+        end
+    end
+
+    ui.endList()
+end
 
 function draw()
-    ui.rect(0, 0, SCR_W, SCR_H, 0x0000)
-    
-    if appMode == "MENU" then
-        ui.text(20, 20, "Select File:", 2, 0x07E0)
-        
-        for i, path in ipairs(fileList) do
-            -- Отрисовка кнопки
-            -- ВАЖНО: проверяем нажатие. Если ui.button не срабатывает, 
-            -- попробуем через проверку координат тача напрямую
-            if ui.button(20, 60 + (i-1)*55, 370, 45, path, 0x2104) then
-                loadBook(path)
-            end
-        end
-        
-        if ui.button(300, 15, 90, 30, "SCAN", 0x421F) then scanFiles() end
-
-    elseif appMode == "READER" then
-        -- Виджет списка (3 экрана высотой)
-        scrollY = ui.beginList(0, 0, SCR_W, SCR_H, scrollY, SCR_H * 3)
-            
-            -- Секция 1: Предидущая
-            if currentPage > 1 then
-                drawPage(currentPage - 1, 0)
-            else
-                ui.text(140, 200, "[START]", 2, 0x421F)
-            end
-            
-            -- Секция 2: Текущая
-            drawPage(currentPage, SCR_H)
-            
-            -- Секция 3: Следующая
-            if currentPage < totalPages then
-                drawPage(currentPage + 1, SCR_H * 2)
-            else
-                ui.text(140, SCR_H * 2 + 200, "[END]", 2, 0x421F)
-            end
-
-        ui.endList()
-
-        -- ЛОГИКА ПЕРЕКЛЮЧЕНИЯ (Твое ТЗ: незаметная подмена)
-        local threshold_top = SCR_H * 0.1
-        local threshold_bottom = SCR_H * 1.9
-
-        if scrollY < threshold_top and currentPage > 1 then
-            currentPage = currentPage - 1
-            scrollY = scrollY + SCR_H -- Возвращаем скролл в центр
-        elseif scrollY > threshold_bottom and currentPage < totalPages then
-            currentPage = currentPage + 1
-            scrollY = scrollY - SCR_H -- Возвращаем скролл в центр
-        end
-
-        -- Доводка (Snapping)
-        local t = ui.getTouch()
-        if not t.touching then
-            -- Плавное стремление к центральному экрану (SCR_H)
-            local speed = 0.2
-            scrollY = scrollY + (SCR_H - scrollY) * speed
-            
-            -- Если почти дошли - фиксируем
-            if math.abs(SCR_H - scrollY) < 1 then scrollY = SCR_H end
-        end
-
-        -- Кнопка выхода
-        if ui.button(5, 5, 40, 40, "<", 0xF800) then appMode = "MENU" end
+    if mode == "browser" then
+        drawBrowser()
+    else
+        drawReader()
     end
+    ui.flush()
 end
 
-function drawPage(pageNum, offsetY)
-    local startIdx = (pageNum - 1) * LINES_PER_PAGE + 1
-    local endIdx = math.min(startIdx + LINES_PER_PAGE - 1, #lines)
-    
-    for i = startIdx, endIdx do
-        local yPos = offsetY + (i - startIdx) * LINE_HEIGHT
-        -- Рисуем только если строка попадает в видимую область (оптимизация)
-        ui.text(15, yPos, lines[i], 2, 0xFFFF)
-    end
+-- Initialization
+if sd_ok then
+    currentSource = "sd"  -- prefer SD if available
 end
+refreshFileList()
