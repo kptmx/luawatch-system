@@ -1,6 +1,5 @@
--- Simple TXT Reader with file browser
--- Fixed: no dependency on sd_ok (check SD availability via sd.list())
--- Large files now possible if you remove 128KB limit in C++ bindings
+-- Simple TXT Reader with file browser and debugging output for scroll/page logic
+-- Added on-screen debug info to diagnose snapping/flipping issues
 
 local W, H = 410, 502
 local HEADER_H = 60
@@ -14,20 +13,21 @@ local visibleH = H - HEADER_H
 local pageH = visibleH
 local contentH_reader = pageH * 3
 
-local mode = "browser"              -- "browser" or "reader"
-local currentSource = "internal"    -- "internal" or "sd"
+local mode = "browser"
+local currentSource = "internal"
 local fileList = {}
 local fileName = ""
 local errorMsg = nil
 local scrollBrowserY = 0
-local scrollY = pageH               -- middle of triple buffer
+local scrollY = pageH
 
 local lines = {}
-local linesPerPage = math.floor((visibleH - 20) / LINE_HEIGHT)
+local linesPerPage = math.floor((visibleH - 20) /
+
 local totalPages = 0
 local currentPage = 0
 
--- Check if SD is available (by trying to list root)
+-- Check SD availability
 local function isSDAvailable()
     local res = sd.list("/")
     if res and res.ok == false then
@@ -36,23 +36,23 @@ local function isSDAvailable()
     return true
 end
 
--- Load file (handle both sources)
+-- Load file
 local function loadFile(path, isSD)
     local content
     if isSD then
         local ok, err = pcall(function()
             local res = sd.readBytes(path)
-            if res and type(res) == "string" then
+            if type(res) == "string" then
                 content = res
             else
                 error("read failed")
             end
         end)
-        if not ok then return false, "SD read error (file too large?)" end
+        if not ok then return false, "SD read error (too large?)" end
     else
         local res = fs.readBytes(path)
         if type(res) ~= "string" then
-            return false, "Flash read error (file too large?)"
+            return false, "Flash read error (too large?)"
         end
         content = res
     end
@@ -86,13 +86,11 @@ local function refreshFileList()
         end
     end
 
-    -- res is either numbered table (files) or error table (for SD)
-    if type(res) ~= "table" or res.ok == false then
+    if type(res) ~= "table" or (res.ok == false) then
         errorMsg = "Failed to list directory"
         return
     end
 
-    -- For internal fs.list returns numbered table, for SD also numbered if ok
     for _, name in ipairs(res) do
         if name:lower():match("%.txt$") then
             table.insert(fileList, name)
@@ -121,14 +119,22 @@ end
 local function drawReader()
     ui.rect(0, 0, W, H, 0)
 
-    ui.text(10, 12, fileName, 2, 0xFFFF)
-    ui.text(W - 220, 12, string.format("Page %d/%d (%d lines)", currentPage + 1, totalPages, #lines), 2, 0xFFFF)
+    -- Header with debug
+    local touch = ui.getTouch()
+    ui.text(10, 12, fileName .. "  Page " .. (currentPage + 1) .. "/" .. totalPages .. " (" .. #lines .. " lines)", 2, 0xFFFF)
     if ui.button(W - 110, 8, 100, 44, "Back", 0xF800) then
         mode = "browser"
     end
 
+    -- Debug info (touch state + scroll values)
+    ui.text(10, 45, string.format("touch: %d press: %d rel: %d x:%d y:%d", 
+        touch.touching and 1 or 0, touch.pressed and 1 or 0, touch.released and 1 or 0, touch.x, touch.y), 1, 0xFFFF)
+
     ui.setListInertia(false)
     local updatedScroll = ui.beginList(0, HEADER_H, W, visibleH, scrollY, contentH_reader)
+
+    local delta = updatedScroll - pageH
+    ui.text(10, 60, string.format("scrollY: %d  upd: %d  delta: %.0f  thresh: %.0f", scrollY, updatedScroll, delta, pageH * 0.25), 1, 0xFFFF)
 
     drawPage(currentPage - 1, 0)
     drawPage(currentPage, pageH)
@@ -136,21 +142,23 @@ local function drawReader()
 
     ui.endList()
 
-    if ui.getTouch().released then
-        local delta = updatedScroll - pageH
-        local threshold = pageH * 0.3
+    if touch.released then
+        local threshold = pageH * 0.25  -- немного уменьшили для легче триггера
 
         if delta < -threshold and currentPage > 0 then
             currentPage = currentPage - 1
         elseif delta > threshold and currentPage < totalPages - 1 then
             currentPage = currentPage + 1
         end
+        -- Instant snap to middle (current page start)
         scrollY = pageH
     else
+        -- Follow finger during drag
         scrollY = updatedScroll
     end
 end
 
+-- Browser code unchanged (same as previous version)
 local function drawBrowser()
     ui.rect(0, 0, W, H, 0)
 
@@ -205,8 +213,8 @@ function draw()
     ui.flush()
 end
 
--- Initialization: try SD first, if available
-local sdAvail, sdErr = isSDAvailable()
+-- Init
+local sdAvail = isSDAvailable()
 if sdAvail then
     currentSource = "sd"
 end
