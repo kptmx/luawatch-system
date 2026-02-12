@@ -1,48 +1,54 @@
 -- Константы
 local W, H = 410, 502
-local HEADER_H = 60
+local HEADER_H = 50
 local MARGIN_X = 15
 local LINE_HEIGHT = 32
 local TEXT_SIZE = 2
-local CHARS_LIMIT = 28 -- Максимальное кол-во СИМВОЛОВ (не байт) в строке
+local CHARS_LIMIT = 24 -- Символов в строке (не байт!)
 
--- Расчетные параметры
+-- Расчетные высоты
 local visibleH = H - HEADER_H
 local pageH = visibleH
-local contentH = pageH * 3
+local contentH = pageH * 3 -- Три экрана высоты
 local linesPerPage = math.floor((visibleH - 20) / LINE_HEIGHT)
 
--- Состояние
+-- Переменные
 local mode = "browser"
-local currentSource = "sd"
+local currentSource = "sd" -- или "internal"
 local fileList = {}
 local fileName = ""
 local lines = {}
 local totalPages = 0
 local currentPage = 0
-local scrollY = pageH 
+local scrollY = pageH -- Начинаем всегда с центра (вторая страница)
 
--- Функция для корректной работы с UTF-8 (подсчет символов и подстроки)
+-- === [ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ] ===
+
+-- Подсчет длины строки UTF-8 (чтобы кириллица считалась за 1 символ)
 local function utf8_len(s)
     local _, count = string.gsub(s, "[^\128-\193]", "")
     return count
 end
 
--- Умный перенос текста по словам
+-- Умный перенос слов
 local function wrapText(text)
     local res = {}
+    -- Разбиваем на параграфы
     for paragraph in (text .. "\n"):gmatch("(.-)\r?\n") do
         if paragraph == "" then 
             table.insert(res, "") 
         else
             local line = ""
             local lineLen = 0
+            -- Разбиваем параграф на слова
             for word in paragraph:gmatch("%S+") do
                 local wLen = utf8_len(word)
+                -- Влезет ли слово в текущую строку?
                 if lineLen + wLen + 1 <= CHARS_LIMIT then
                     line = line .. (line == "" and "" or " ") .. word
                     lineLen = lineLen + wLen + (line == "" and 0 or 1)
                 else
+                    -- Не влезло, сохраняем строку и начинаем новую
                     table.insert(res, line)
                     line = word
                     lineLen = wLen
@@ -54,7 +60,6 @@ local function wrapText(text)
     return res
 end
 
--- Загрузка файла
 local function loadFile(path)
     local data = (currentSource == "sd") and sd.readBytes(path) or fs.readBytes(path)
     if not data or #data == 0 then return false end
@@ -74,74 +79,92 @@ local function refreshFiles()
         for _, name in ipairs(res) do
             if name:lower():match("%.txt$") then table.insert(fileList, name) end
         end
+        table.sort(fileList)
     end
 end
 
--- Отрисовка страницы
+-- === [ОТРИСОВКА] ===
+
+-- Рисует одну страницу текста по указанному смещению Y
 local function renderPage(pIdx, baseY)
-    if pIdx < 0 or pIdx >= totalPages then
-        local msg = (pIdx < 0) and "--- НАЧАЛО ФАЙЛА ---" or "--- КОНЕЦ ФАЙЛА ---"
-        ui.text(W/2 - 100, baseY + visibleH/2, msg, 2, 0x8410)
+    -- Плейсхолдеры для начала и конца файла
+    if pIdx < 0 then
+        ui.text(W/2 - 80, baseY + visibleH/2, "--- НАЧАЛО ---", 2, 0x8410)
+        return
+    elseif pIdx >= totalPages then
+        ui.text(W/2 - 80, baseY + visibleH/2, "--- КОНЕЦ ---", 2, 0x8410)
         return
     end
 
     local start = pIdx * linesPerPage + 1
     local stop = math.min(start + linesPerPage - 1, #lines)
+    
     for i = start, stop do
-        ui.text(MARGIN_X, baseY + 15 + (i - start) * LINE_HEIGHT, lines[i], TEXT_SIZE, 0xFFFF)
+        local y = baseY + 10 + (i - start) * LINE_HEIGHT
+        ui.text(MARGIN_X, y, lines[i], TEXT_SIZE, 0xFFFF)
     end
 end
 
--- РИДЕР
 local function drawReader()
     ui.rect(0, 0, W, H, 0)
     
-    -- Инфо-панель
-    ui.text(10, 15, (currentPage + 1) .. " / " .. totalPages, 2, 0x07E0)
-    if ui.button(W - 80, 10, 70, 40, "EXIT", 0xF800) then mode = "browser" end
+    -- Шапка
+    ui.fillRoundRect(0, 0, W, HEADER_H - 5, 0, 0x10A2)
+    ui.text(10, 10, (currentPage + 1) .. " / " .. totalPages, 2, 0xFFFF)
+    if ui.button(W - 80, 5, 70, 35, "EXIT", 0xF800) then mode = "browser" end
 
-    -- Список (3 страницы)
+    -- Важно: Отключаем инерцию списка, мы будем делать её сами математикой
     ui.setListInertia(false)
+
+    -- Рисуем список. updatedScroll - это то, где список находится СЕЙЧАС (физически)
     local updatedScroll = ui.beginList(0, HEADER_H, W, visibleH, scrollY, contentH)
+        
+        -- Секция 1 (предыдущая) - от 0 до pageH
         renderPage(currentPage - 1, 0)
+        
+        -- Секция 2 (текущая) - от pageH до pageH*2
         renderPage(currentPage, pageH)
+        
+        -- Секция 3 (следующая) - от pageH*2 до pageH*3
         renderPage(currentPage + 1, pageH * 2)
+
     ui.endList()
 
     local touch = ui.getTouch()
-    
-    if touch.touching then
-        -- Ограничители, чтобы не листать в пустоту на первой и последней странице
-        if currentPage == 0 and updatedScroll < pageH then
-            scrollY = pageH -- Блокируем скролл вверх на 1-й странице
-        elseif currentPage == totalPages - 1 and updatedScroll > pageH then
-            scrollY = pageH -- Блокируем скролл вниз на последней
-        else
-            scrollY = updatedScroll
-        end
-    else
-        -- Логика переключения
-        local diff = scrollY - pageH
-        local threshold = pageH * 0.3 -- 30% экрана для листания
 
-        if diff < -threshold and currentPage > 0 then
-            currentPage = currentPage - 1
-            scrollY = pageH -- Мгновенная подмена
-        elseif diff > threshold and currentPage < totalPages - 1 then
+    if touch.touching then
+        -- 1. Если палец на экране, список просто следует за ним
+        scrollY = updatedScroll
+    else
+        -- 2. Палец отпущен. Анализируем смещение от ЦЕНТРА (pageH)
+        local diff = updatedScroll - pageH
+        local threshold = pageH * 0.30 -- 30% экрана нужно протащить для перелистывания
+
+        -- СЦЕНАРИЙ А: Перелистывание ВПЕРЕД (свайп вверх)
+        if diff > threshold and currentPage < totalPages - 1 then
             currentPage = currentPage + 1
-            scrollY = pageH -- Мгновенная подмена
+            scrollY = pageH -- Мгновенный сброс в центр (бесшовная подмена)
+            
+        -- СЦЕНАРИЙ Б: Перелистывание НАЗАД (свайп вниз)
+        elseif diff < -threshold and currentPage > 0 then
+            currentPage = currentPage - 1
+            scrollY = pageH -- Мгновенный сброс в центр (бесшовная подмена)
+            
+        -- СЦЕНАРИЙ В: Не дотянули до 30% или край файла -> АНИМАЦИЯ ВОЗВРАТА
         else
-            -- ПЛАВНАЯ ДОВОДКА (Анимация)
-            if math.abs(diff) > 2 then
-                scrollY = scrollY - (diff * 0.15) -- Коэффициент 0.15 для плавности
+            -- Нам нужно плавно изменить scrollY от текущего (updatedScroll) к целевому (pageH)
+            -- math.abs(diff) > 1 нужно чтобы остановить бесконечные микродвижения
+            if math.abs(diff) > 1 then
+                -- Формула плавности: (Цель - Текущее) * Скорость
+                -- 0.2 - это скорость анимации (чем меньше число, тем плавнее)
+                scrollY = updatedScroll - (diff * 0.2)
             else
-                scrollY = pageH
+                scrollY = pageH -- Доводка завершена
             end
         end
     end
 end
 
--- БРАУЗЕР
 local function drawBrowser()
     ui.rect(0, 0, W, H, 0)
     ui.text(20, 15, "FILES (" .. currentSource .. ")", 2, 0xFFFF)
@@ -167,5 +190,5 @@ function draw()
     ui.flush()
 end
 
--- Инициализация
+-- Старт
 refreshFiles()
