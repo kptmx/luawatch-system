@@ -4,7 +4,7 @@ local HEADER_H = 50
 local MARGIN_X = 15
 local LINE_HEIGHT = 32
 local TEXT_SIZE = 2
-local CHARS_LIMIT = 24 -- Символов в строке (не байт!)
+local CHARS_LIMIT = 28 -- Символов в строке (не байт!)
 -- Расчетные высоты
 local visibleH = H - HEADER_H
 local pageH = visibleH
@@ -132,7 +132,7 @@ local function drawReader()
         if animDir ~= 0 then
             -- Продолжаем анимацию
             local progDir = (targetProgress - animProgress > 0) and 1 or -1
-            animProgress = animProgress + 0.1 * progDir  -- 0.1 - скорость анимации (настройте по вкусу)
+            animProgress = animProgress + 0.3 * progDir  -- 0.1 - скорость анимации (настройте по вкусу)
             if (progDir > 0 and animProgress >= targetProgress) or (progDir < 0 and animProgress <= targetProgress) then
                 if isFlip then
                     currentPage = currentPage + animDir
