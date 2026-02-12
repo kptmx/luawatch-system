@@ -4,7 +4,7 @@ local HEADER_H = 50
 local MARGIN_X = 15
 local LINE_HEIGHT = 32
 local TEXT_SIZE = 2
-local CHARS_LIMIT = 20 -- Символов в строке (не байт!)
+local CHARS_LIMIT = 24 -- Символов в строке (не байт!)
 -- Расчетные высоты
 local visibleH = H - HEADER_H
 local pageH = visibleH
