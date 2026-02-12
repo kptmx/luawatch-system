@@ -1,113 +1,135 @@
--- Константы экрана и чистки
 local SCR_W, SCR_H = 410, 502
-local LIST_X, LIST_Y = 5, 65
-local LIST_W, LIST_H = 400, 375
-local PAGE_H = LIST_H -- Высота одной "страницы" текста
+local LINE_HEIGHT = 28
+local LINES_PER_PAGE = math.floor(SCR_H / LINE_HEIGHT)
+local CHARS_PER_LINE = 30 
 
--- Состояние приложения
-local state = "browser" -- "browser" или "reader"
-local full_text = ""
-local pages = {}
-local current_page_idx = 1
-local scroll_y = PAGE_H -- Начинаем с центра (вторая страница)
-local is_moving = false
+local appMode = "MENU"
+local fileList = {}
+local lines = {}
+local currentPage = 1
+local totalPages = 1
+local scrollY = SCR_H 
 
--- Файловый браузер
-local files = {}
-local current_path = "/"
-local storage = "fs" -- или "sd"
-
-function load_file_list(path, type)
-    storage = type
-    current_path = path
-    local res = (type == "sd") and sd.list(path) or fs.list(path)
-    files = res or {}
-end
-
--- Разбивка текста на страницы (упрощенно по строкам)
-function paginate(text)
-    pages = {}
-    local lines_per_page = 15 -- Настрой под размер шрифта
-    local current_line = 0
-    local page_content = ""
-    
-    for line in text:gmatch("[^\r\n]+") do
-        page_content = page_content .. line .. "\n"
-        current_line = current_line + 1
-        if current_line >= lines_per_page then
-            table.insert(pages, page_content)
-            page_content = ""
-            current_line = 0
+-- Функция сканирования
+local function scanFiles()
+    fileList = {}
+    local all = sd.list("/")
+    if all then
+        for _, v in ipairs(all) do
+            if string.find(v:lower(), ".txt") then
+                table.insert(fileList, "/sdcard/" .. v)
+            end
         end
     end
-    if page_content ~= "" then table.insert(pages, page_content) end
+    -- Если SD пустая, добавим хотя бы системный лог для проверки
+    if #fileList == 0 then table.insert(fileList, "/main.lua") end
 end
+
+-- Загрузка книги
+local function loadBook(path)
+    print("Trying to load: " .. path) -- Отладка в консоль Serial
+    local data = sd.readBytes(path)
+    if not data then data = fs.load(path) end
+    
+    if data and #data > 0 then
+        lines = {}
+        -- Безопасный парсинг строк
+        for line in string.gmatch(data, "([^\r\n]+)") do
+            local str = line
+            while #str > CHARS_PER_LINE do
+                table.insert(lines, string.sub(str, 1, CHARS_PER_LINE))
+                str = string.sub(str, CHARS_PER_LINE + 1)
+            end
+            table.insert(lines, str)
+        end
+        
+        totalPages = math.ceil(#lines / LINES_PER_PAGE)
+        currentPage = 1
+        scrollY = SCR_H
+        appMode = "READER"
+        print("Loaded lines: " .. #lines)
+    else
+        print("Failed to load or file empty")
+    end
+end
+
+scanFiles()
 
 function draw()
-    ui.rect(0, 0, SCR_W, SCR_H, 0)
+    ui.rect(0, 0, SCR_W, SCR_H, 0x0000)
     
-    if state == "browser" then
-        ui.text(20, 20, "File Browser ("..storage..")", 2, 0x07E0)
+    if appMode == "MENU" then
+        ui.text(20, 20, "Select File:", 2, 0x07E0)
         
-        if ui.button(300, 15, 90, 35, storage == "fs" and "to SD" or "to FS", 0x3186) then
-            load_file_list("/", storage == "fs" and "sd" or "fs")
-        end
-
-        local total_h = #files * 50
-        local browser_scroll = ui.beginList(LIST_X, LIST_Y, LIST_W, LIST_H, browser_scroll or 0, total_h)
-        for i, f in ipairs(files) do
-            if ui.button(10, (i-1)*50, 360, 45, f, 0x2104) then
-                local content = (storage == "sd") and sd.readBytes(current_path .. f) or fs.load(current_path .. f)
-                if content then
-                    full_text = content
-                    paginate(full_text)
-                    current_page_idx = 1
-                    scroll_y = PAGE_H -- Центрируем
-                    state = "reader"
-                end
+        for i, path in ipairs(fileList) do
+            -- Отрисовка кнопки
+            -- ВАЖНО: проверяем нажатие. Если ui.button не срабатывает, 
+            -- попробуем через проверку координат тача напрямую
+            if ui.button(20, 60 + (i-1)*55, 370, 45, path, 0x2104) then
+                loadBook(path)
             end
         end
-        ui.endList()
-
-    elseif state == "reader" then
-        ui.text(20, 20, "Reader: " .. current_page_idx .. "/" .. #pages, 2, 0x07FF)
-        if ui.button(330, 15, 70, 35, "Back", 0x6000) then state = "browser" end
-
-        -- Виртуальный скролл (три страницы высотой PAGE_H)
-        -- Общая высота контента = PAGE_H * 3
-        local new_scroll = ui.beginList(LIST_X, LIST_Y, LIST_W, LIST_H, scroll_y, PAGE_H * 3)
         
-        -- Отрисовка трех сегментов
-        for i = -1, 1 do
-            local p_idx = current_page_idx + i
-            local py = (i + 1) * PAGE_H
-            if pages[p_idx] then
-                ui.text(10, py + 10, pages[p_idx], 2, 0xFFFF)
+        if ui.button(300, 15, 90, 30, "SCAN", 0x421F) then scanFiles() end
+
+    elseif appMode == "READER" then
+        -- Виджет списка (3 экрана высотой)
+        scrollY = ui.beginList(0, 0, SCR_W, SCR_H, scrollY, SCR_H * 3)
+            
+            -- Секция 1: Предидущая
+            if currentPage > 1 then
+                drawPage(currentPage - 1, 0)
             else
-                ui.text(10, py + 10, "--- Конец файла ---", 2, 0x4208)
+                ui.text(140, 200, "[START]", 2, 0x421F)
             end
-        end
-        
-        -- Логика переключения страниц
-        local touch = ui.getTouch()
-        if not touch.touching then
-            -- Если пользователь отпустил экран, проверяем, куда сместился скролл
-            if new_scroll < PAGE_H * 0.5 and current_page_idx > 1 then
-                current_page_idx = current_page_idx - 1
-                new_scroll = PAGE_H -- Мгновенный возврат в центр
-            elseif new_scroll > PAGE_H * 1.5 and current_page_idx < #pages then
-                current_page_idx = current_page_idx + 1
-                new_scroll = PAGE_H -- Мгновенный возврат в центр
-            elseif math.abs(new_scroll - PAGE_H) > 10 then
-                -- Доводчик к центру (плавность обеспечивается инерцией из C++)
-                new_scroll = PAGE_H 
+            
+            -- Секция 2: Текущая
+            drawPage(currentPage, SCR_H)
+            
+            -- Секция 3: Следующая
+            if currentPage < totalPages then
+                drawPage(currentPage + 1, SCR_H * 2)
+            else
+                ui.text(140, SCR_H * 2 + 200, "[END]", 2, 0x421F)
             end
+
+        ui.endList()
+
+        -- ЛОГИКА ПЕРЕКЛЮЧЕНИЯ (Твое ТЗ: незаметная подмена)
+        local threshold_top = SCR_H * 0.1
+        local threshold_bottom = SCR_H * 1.9
+
+        if scrollY < threshold_top and currentPage > 1 then
+            currentPage = currentPage - 1
+            scrollY = scrollY + SCR_H -- Возвращаем скролл в центр
+        elseif scrollY > threshold_bottom and currentPage < totalPages then
+            currentPage = currentPage + 1
+            scrollY = scrollY - SCR_H -- Возвращаем скролл в центр
         end
 
-        scroll_y = new_scroll
-        ui.endList()
+        -- Доводка (Snapping)
+        local t = ui.getTouch()
+        if not t.touching then
+            -- Плавное стремление к центральному экрану (SCR_H)
+            local speed = 0.2
+            scrollY = scrollY + (SCR_H - scrollY) * speed
+            
+            -- Если почти дошли - фиксируем
+            if math.abs(SCR_H - scrollY) < 1 then scrollY = SCR_H end
+        end
+
+        -- Кнопка выхода
+        if ui.button(5, 5, 40, 40, "<", 0xF800) then appMode = "MENU" end
     end
 end
 
--- Инициализация при запуске
-load_file_list("/", "fs")
+function drawPage(pageNum, offsetY)
+    local startIdx = (pageNum - 1) * LINES_PER_PAGE + 1
+    local endIdx = math.min(startIdx + LINES_PER_PAGE - 1, #lines)
+    
+    for i = startIdx, endIdx do
+        local yPos = offsetY + (i - startIdx) * LINE_HEIGHT
+        -- Рисуем только если строка попадает в видимую область (оптимизация)
+        ui.text(15, yPos, lines[i], 2, 0xFFFF)
+    end
+end
