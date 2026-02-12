@@ -5,13 +5,11 @@ local MARGIN_X = 15
 local LINE_HEIGHT = 32
 local TEXT_SIZE = 2
 local CHARS_LIMIT = 20 -- Символов в строке (не байт!)
-
 -- Расчетные высоты
 local visibleH = H - HEADER_H
 local pageH = visibleH
 local contentH = pageH * 3 -- Три экрана высоты
 local linesPerPage = math.floor((visibleH - 20) / LINE_HEIGHT)
-
 -- Переменные
 local mode = "browser"
 local currentSource = "sd" -- или "internal"
@@ -21,29 +19,23 @@ local lines = {}
 local totalPages = 0
 local currentPage = 0
 local scrollY = pageH -- Начинаем всегда с центра (вторая страница)
-
--- Дополнительные переменные для анимации
-local animationVelocity = 0
-local animationActive = false
-local animationTarget = pageH
-local ANIMATION_DAMPING = 0.15 -- Скорость анимации (0.1-0.2 оптимально)
-local SWIPE_THRESHOLD = pageH * 0.30 -- 30% экрана
-
+local animDir = 0
+local animProgress = 0
+local targetProgress = 0
+local isFlip = false
 -- === [ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ] ===
-
 -- Подсчет длины строки UTF-8 (чтобы кириллица считалась за 1 символ)
 local function utf8_len(s)
     local _, count = string.gsub(s, "[^\128-\193]", "")
     return count
 end
-
 -- Умный перенос слов
 local function wrapText(text)
     local res = {}
     -- Разбиваем на параграфы
     for paragraph in (text .. "\n"):gmatch("(.-)\r?\n") do
-        if paragraph == "" then 
-            table.insert(res, "") 
+        if paragraph == "" then
+            table.insert(res, "")
         else
             local line = ""
             local lineLen = 0
@@ -66,21 +58,17 @@ local function wrapText(text)
     end
     return res
 end
-
 local function loadFile(path)
     local data = (currentSource == "sd") and sd.readBytes(path) or fs.readBytes(path)
     if not data or #data == 0 then return false end
-    
+   
     lines = wrapText(data)
     totalPages = math.ceil(#lines / linesPerPage)
     currentPage = 0
     scrollY = pageH
-    animationActive = false
-    animationVelocity = 0
     mode = "reader"
     return true
 end
-
 local function refreshFiles()
     fileList = {}
     local res = (currentSource == "sd") and sd.list("/") or fs.list("/")
@@ -91,146 +79,102 @@ local function refreshFiles()
         table.sort(fileList)
     end
 end
-
 -- === [ОТРИСОВКА] ===
-
 -- Рисует одну страницу текста по указанному смещению Y
 local function renderPage(pIdx, baseY)
-    -- Проверка границ массива
-    if pIdx < 0 or pIdx >= totalPages then
-        -- Рисуем плейсхолдеры только если страница в пределах видимой области
-        if baseY >= -50 and baseY < H then
-            local msg = pIdx < 0 and "--- НАЧАЛО ---" or "--- КОНЕЦ ---"
-            ui.text(W/2 - 80, baseY + visibleH/2, msg, 2, 0x8410)
-        end
+    -- Плейсхолдеры для начала и конца файла
+    if pIdx < 0 then
+        ui.text(W/2 - 80, baseY + visibleH/2, "--- НАЧАЛО ---", 2, 0x8410)
+        return
+    elseif pIdx >= totalPages then
+        ui.text(W/2 - 80, baseY + visibleH/2, "--- КОНЕЦ ---", 2, 0x8410)
         return
     end
-
     local start = pIdx * linesPerPage + 1
     local stop = math.min(start + linesPerPage - 1, #lines)
-    
+   
     for i = start, stop do
         local y = baseY + 10 + (i - start) * LINE_HEIGHT
-        -- Проверяем, что строка видна на экране (оптимизация)
-        if y + 20 > HEADER_H and y < H then
-            ui.text(MARGIN_X, y, lines[i], TEXT_SIZE, 0xFFFF)
-        end
+        ui.text(MARGIN_X, y, lines[i], TEXT_SIZE, 0xFFFF)
     end
 end
-
 local function drawReader()
     ui.rect(0, 0, W, H, 0)
-    
+   
     -- Шапка
     ui.fillRoundRect(0, 0, W, HEADER_H - 5, 0, 0x10A2)
     ui.text(10, 10, (currentPage + 1) .. " / " .. totalPages, 2, 0xFFFF)
-    if ui.button(W - 80, 5, 70, 35, "EXIT", 0xF800) then 
-        mode = "browser"
-        animationActive = false
-    end
-
-    -- Важно: Отключаем инерцию списка, мы будем делать её сами
+    if ui.button(W - 80, 5, 70, 35, "EXIT", 0xF800) then mode = "browser" end
+    -- Важно: Отключаем инерцию списка, мы будем делать её сами математикой
     ui.setListInertia(false)
-
-    -- Получаем состояние касания
-    local touch = ui.getTouch()
-    
-    -- Обработка касания и обновление scrollY
-    if touch.touching then
-        -- Если палец на экране, список следует за ним
-        local updatedScroll = ui.beginList(0, HEADER_H, W, visibleH, scrollY, contentH)
-        
-        -- Рендерим три страницы
+    -- Рисуем список. updatedScroll - это то, где список находится СЕЙЧАС (физически)
+    local updatedScroll = ui.beginList(0, HEADER_H, W, visibleH, scrollY, contentH)
+       
+        -- Секция 1 (предыдущая) - от 0 до pageH
         renderPage(currentPage - 1, 0)
+       
+        -- Секция 2 (текущая) - от pageH до pageH*2
         renderPage(currentPage, pageH)
+       
+        -- Секция 3 (следующая) - от pageH*2 до pageH*3
         renderPage(currentPage + 1, pageH * 2)
-        
-        ui.endList()
-        
-        -- Сохраняем новую позицию
+    ui.endList()
+    local touch = ui.getTouch()
+    if touch.touching then
+        -- 1. Если палец на экране, список просто следует за ним
         scrollY = updatedScroll
-        animationActive = false -- Отменяем анимацию при касании
-        animationVelocity = 0
-        
+        animDir = 0  -- Прерываем анимацию при касании
     else
-        -- Палец отпущен
-        if animationActive then
-            -- Продолжаем анимацию возврата
-            scrollY = ui.beginList(0, HEADER_H, W, visibleH, scrollY, contentH)
-            
-            renderPage(currentPage - 1, 0)
-            renderPage(currentPage, pageH)
-            renderPage(currentPage + 1, pageH * 2)
-            
-            ui.endList()
-            
-            -- Плавное движение к цели
-            local diff = scrollY - animationTarget
-            if math.abs(diff) > 0.5 then
-                -- Применяем демпфирование
-                scrollY = scrollY - diff * ANIMATION_DAMPING
+        -- 2. Палец отпущен. Анализируем смещение от ЦЕНТРА (pageH)
+        local diff = updatedScroll - pageH
+        local threshold = pageH * 0.30 -- 30% экрана нужно протащить для перелистывания
+        
+        if animDir ~= 0 then
+            -- Продолжаем анимацию
+            local progDir = (targetProgress - animProgress > 0) and 1 or -1
+            animProgress = animProgress + 0.1 * progDir  -- 0.1 - скорость анимации (настройте по вкусу)
+            if (progDir > 0 and animProgress >= targetProgress) or (progDir < 0 and animProgress <= targetProgress) then
+                if isFlip then
+                    currentPage = currentPage + animDir
+                end
+                scrollY = pageH
+                animDir = 0
             else
-                -- Достигли цели
-                scrollY = animationTarget
-                animationActive = false
+                scrollY = pageH + animDir * animProgress * pageH
             end
         else
-            -- Начало анимации - анализируем свайп
-            local diff = scrollY - pageH
-            
-            -- Проверяем порог свайпа
-            if math.abs(diff) > SWIPE_THRESHOLD then
-                -- Достаточный свайп - перелистываем
-                if diff > 0 and currentPage < totalPages - 1 then
-                    currentPage = currentPage + 1
-                    scrollY = pageH
-                elseif diff < 0 and currentPage > 0 then
-                    currentPage = currentPage - 1
-                    scrollY = pageH
-                else
-                    -- Край файла - просто возвращаемся
-                    animationActive = true
-                    animationTarget = pageH
-                    -- Принудительно обновляем список, чтобы анимация началась
-                    scrollY = ui.beginList(0, HEADER_H, W, visibleH, scrollY, contentH)
-                    renderPage(currentPage - 1, 0)
-                    renderPage(currentPage, pageH)
-                    renderPage(currentPage + 1, pageH * 2)
-                    ui.endList()
-                end
+            -- Решаем, флип или возврат
+            if diff > threshold and currentPage < totalPages - 1 then
+                animDir = 1
+                animProgress = diff / pageH
+                targetProgress = 1
+                isFlip = true
+            elseif diff < -threshold and currentPage > 0 then
+                animDir = -1
+                animProgress = math.abs(diff) / pageH
+                targetProgress = 1
+                isFlip = true
+            elseif math.abs(diff) > 1 then
+                animDir = (diff > 0) and 1 or -1
+                animProgress = math.abs(diff) / pageH
+                targetProgress = 0
+                isFlip = false
             else
-                -- Недостаточный свайп - запускаем анимацию возврата
-                animationActive = true
-                animationTarget = pageH
-                -- Обновляем список для первого кадра анимации
-                scrollY = ui.beginList(0, HEADER_H, W, visibleH, scrollY, contentH)
-                renderPage(currentPage - 1, 0)
-                renderPage(currentPage, pageH)
-                renderPage(currentPage + 1, pageH * 2)
-                ui.endList()
+                scrollY = pageH
             end
         end
-        
-        -- Защита от выхода за границы
-        if scrollY < 0 then
-            scrollY = 0
-            animationActive = false
-        elseif scrollY > contentH - visibleH then
-            scrollY = contentH - visibleH
-            animationActive = false
-        end
     end
+    -- Округляем scrollY до целого, чтобы избежать проблем с плавающей точкой
+    scrollY = math.floor(scrollY + 0.5)
 end
-
 local function drawBrowser()
     ui.rect(0, 0, W, H, 0)
     ui.text(20, 15, "FILES (" .. currentSource .. ")", 2, 0xFFFF)
-    
+   
     if ui.button(W - 100, 10, 90, 35, "SOURCE", 0x421F) then
         currentSource = (currentSource == "sd") and "internal" or "sd"
         refreshFiles()
     end
-
     local bScroll = 0
     bScroll = ui.beginList(0, 60, W, H - 60, bScroll, #fileList * 55)
     for i, f in ipairs(fileList) do
@@ -241,15 +185,9 @@ local function drawBrowser()
     end
     ui.endList()
 end
-
 function draw()
-    if mode == "browser" then 
-        drawBrowser() 
-    else 
-        drawReader() 
-    end
+    if mode == "browser" then drawBrowser() else drawReader() end
     ui.flush()
 end
-
 -- Старт
 refreshFiles()
