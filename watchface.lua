@@ -81,91 +81,76 @@ local function refreshFiles()
 end
 -- === [ОТРИСОВКА] ===
 -- Рисует одну страницу текста по указанному смещению Y
+-- Оптимизированная отрисовка страницы
 local function renderPage(pIdx, baseY)
-    -- Плейсхолдеры для начала и конца файла
-    if pIdx < 0 then
-        ui.text(W/2 - 80, baseY + visibleH/2, "--- НАЧАЛО ---", 2, 0x8410)
-        return
-    elseif pIdx >= totalPages then
-        ui.text(W/2 - 80, baseY + visibleH/2, "--- КОНЕЦ ---", 2, 0x8410)
+    if pIdx < 0 or pIdx >= totalPages then
+        ui.text(W/2 - 50, baseY + visibleH/2, pIdx < 0 and "START" or "END", 2, 0x8410)
         return
     end
+
     local start = pIdx * linesPerPage + 1
     local stop = math.min(start + linesPerPage - 1, #lines)
-   
+    
+    -- Оптимизация: не рисуем то, что за пределами физического экрана
+    -- baseY — это координата начала страницы относительно 0 экрана
     for i = start, stop do
-        local y = baseY + 10 + (i - start) * LINE_HEIGHT
-        ui.text(MARGIN_X, y, lines[i], TEXT_SIZE, 0xFFFF)
-    end
-end
-local function drawReader()
-    ui.rect(0, 0, W, H, 0)
-   
-    -- Шапка
-    ui.fillRoundRect(0, 0, W, HEADER_H - 5, 0, 0x10A2)
-    ui.text(10, 10, (currentPage + 1) .. " / " .. totalPages, 2, 0xFFFF)
-    if ui.button(W - 80, 5, 70, 35, "EXIT", 0xF800) then mode = "browser" end
-    -- Важно: Отключаем инерцию списка, мы будем делать её сами математикой
-    ui.setListInertia(false)
-    -- Рисуем список. updatedScroll - это то, где список находится СЕЙЧАС (физически)
-    local updatedScroll = ui.beginList(0, HEADER_H, W, visibleH, scrollY, contentH)
-       
-        -- Секция 1 (предыдущая) - от 0 до pageH
-        renderPage(currentPage - 1, 0)
-       
-        -- Секция 2 (текущая) - от pageH до pageH*2
-        renderPage(currentPage, pageH)
-       
-        -- Секция 3 (следующая) - от pageH*2 до pageH*3
-        renderPage(currentPage + 1, pageH * 2)
-    ui.endList()
-    local touch = ui.getTouch()
-    if touch.touching then
-        -- 1. Если палец на экране, список просто следует за ним
-        scrollY = updatedScroll
-        animDir = 0  -- Прерываем анимацию при касании
-    else
-        -- 2. Палец отпущен. Анализируем смещение от ЦЕНТРА (pageH)
-        local diff = updatedScroll - pageH
-        local threshold = pageH * 0.30 -- 30% экрана нужно протащить для перелистывания
-        
-        if animDir ~= 0 then
-            -- Продолжаем анимацию
-            local progDir = (targetProgress - animProgress > 0) and 1 or -1
-            animProgress = animProgress + 0.3 * progDir  -- 0.1 - скорость анимации (настройте по вкусу)
-            if (progDir > 0 and animProgress >= targetProgress) or (progDir < 0 and animProgress <= targetProgress) then
-                if isFlip then
-                    currentPage = currentPage + animDir
-                end
-                scrollY = pageH
-                animDir = 0
-            else
-                scrollY = pageH + animDir * animProgress * pageH
-            end
-        else
-            -- Решаем, флип или возврат
-            if diff > threshold and currentPage < totalPages - 1 then
-                animDir = 1
-                animProgress = diff / pageH
-                targetProgress = 1
-                isFlip = true
-            elseif diff < -threshold and currentPage > 0 then
-                animDir = -1
-                animProgress = math.abs(diff) / pageH
-                targetProgress = 1
-                isFlip = true
-            elseif math.abs(diff) > 1 then
-                animDir = (diff > 0) and 1 or -1
-                animProgress = math.abs(diff) / pageH
-                targetProgress = 0
-                isFlip = false
-            else
-                scrollY = pageH
-            end
+        local lineY = baseY + 10 + (i - start) * LINE_HEIGHT
+        if lineY > -LINE_HEIGHT and lineY < H then -- Clip check
+            ui.text(MARGIN_X, lineY, lines[i], TEXT_SIZE, 0xFFFF)
         end
     end
-    -- Округляем scrollY до целого, чтобы избежать проблем с плавающей точкой
-    scrollY = math.floor(scrollY + 0.5)
+end
+
+local function drawReader()
+    ui.rect(0, 0, W, H, 0)
+    
+    -- Отрисовка интерфейса (статично)
+    ui.fillRoundRect(0, 0, W, HEADER_H - 5, 0, 0x10A2)
+    ui.text(10, 15, string.format("%d / %d", currentPage + 1, totalPages), 2, 0xFFFF)
+    if ui.button(W - 80, 5, 70, 35, "EXIT", 0xF800) then mode = "browser" end
+
+    local touch = ui.getTouch()
+    
+    -- ЛОГИКА АНИМАЦИИ (упрощенная)
+    if touch.touching then
+        -- Когда тянем, просто меняем временное смещение
+        if not lastTouchY then lastTouchY = touch.y end
+        local delta = touch.y - lastTouchY
+        scrollY = pageH + delta
+        animDir = 0
+    else
+        lastTouchY = nil
+        -- Плавный возврат или перелистывание (Lerp)
+        local targetScroll = pageH
+        local diff = scrollY - pageH
+        
+        if math.abs(diff) > pageH * 0.25 then
+            if diff < 0 and currentPage < totalPages - 1 then 
+                targetScroll = 0 -- Листаем вперед
+            elseif diff > 0 and currentPage > 0 then 
+                targetScroll = pageH * 2 -- Листаем назад
+            end
+        end
+        
+        -- Плавное приближение к цели (простой Lerp эффективнее сложной анимации)
+        if math.abs(scrollY - targetScroll) > 1 then
+            scrollY = scrollY + (targetScroll - scrollY) * 0.3
+        else
+            -- Завершение анимации
+            if targetScroll == 0 then currentPage = currentPage + 1 end
+            if targetScroll == pageH * 2 then currentPage = currentPage - 1 end
+            scrollY = pageH
+        end
+    end
+
+    -- Рендерим только нужные страницы напрямую без beginList
+    -- Это сэкономит кучу ресурсов на обработке внутренних контейнеров списка
+    local drawY = scrollY - pageH
+    
+    -- Используем экранные координаты напрямую
+    renderPage(currentPage - 1, HEADER_H + drawY - pageH)
+    renderPage(currentPage,     HEADER_H + drawY)
+    renderPage(currentPage + 1, HEADER_H + drawY + pageH)
 end
 local function drawBrowser()
     ui.rect(0, 0, W, H, 0)
